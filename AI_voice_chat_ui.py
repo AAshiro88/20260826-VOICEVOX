@@ -12,7 +12,7 @@
 - 角色設定：自訂 AI 人設（例如「傲嬌的妹妹」），隨對話存進 chats/*.json，
   載入對話時一併還原
 - 歷史過長時自動呼叫目前模型整理成摘要（整理中禁止送出新訊息）
-- AI 回覆逐句合成播放，可中途停止朗讀
+- AI 回覆逐句合成播放，可中途停止朗讀；雙擊任何一則日文回覆可重新播放
 - VOICEVOX 只能正確朗讀日文，因此要求模型以「日:/中:」兩行格式回覆
 
 僅使用 Python 標準庫，不需安裝第三方套件。
@@ -254,10 +254,15 @@ class VoiceChatApp:
         self.stop_requested = False
 
         # 對話工作階段狀態
-        self.current_session = None  # dict：name/created_at/updated_at/speaker_id/provider/model/history
+        self.current_session = None  # dict：name/created_at/updated_at/speaker_id/provider/model/persona/history
         self.current_path = None  # 目前對話檔案路徑
         self.session_paths = {}  # 名稱 → 檔案路徑
         self.file_lock = threading.Lock()
+
+        # 日文回覆重播：標籤名稱 → 該則日文內容
+        self.replay_seq = 0
+        self.replay_texts = {}
+        self.replay_hint_shown = False
 
         # 角色設定：屬於各對話工作階段，存取皆透過 current_session["persona"]
         self.persona = ""
@@ -382,6 +387,32 @@ class VoiceChatApp:
         self.chat.see("end")
         self.chat.configure(state="disabled")
 
+    def _register_ai_message(self, jp, zh):
+        """顯示一則 AI 回覆；日文行加上標籤，雙擊可重新播放。"""
+        self.replay_seq += 1
+        tag = f"replay_{self.replay_seq}"
+        self.replay_texts[tag] = jp
+
+        self.chat.configure(state="normal")
+        # 日文行：底線提示可點擊，滑鼠移入變手型
+        self.chat.tag_configure(tag, foreground="#000000", underline=True)
+        self.chat.tag_bind(tag, "<Double-Button-1>", lambda e, t=tag: self.replay_message(t))
+        self.chat.tag_bind(tag, "<Enter>", lambda e: self.chat.configure(cursor="hand2"))
+        self.chat.tag_bind(tag, "<Leave>", lambda e: self.chat.configure(cursor=""))
+        self.chat.insert("end", "AI（日）：")
+        self.chat.insert("end", f"{jp}\n", tag)
+        self.chat.see("end")
+        self.chat.configure(state="disabled")
+
+        if zh:
+            self._append(f"AI（中）：{zh}\n\n", "zh")
+        else:
+            self._append("\n")
+
+        if not self.replay_hint_shown:
+            self.replay_hint_shown = True
+            self._append("[提示：雙擊日文句子可重新播放聲音]\n", "sys")
+
     # ---------- 佇列輪詢：工作執行緒透過佇列更新畫面 ----------
 
     def _poll_queue(self):
@@ -391,6 +422,8 @@ class VoiceChatApp:
                 kind = msg[0]
                 if kind == "text":
                     self._append(msg[1], msg[2] if len(msg) > 2 else None)
+                elif kind == "ai_msg":
+                    self._register_ai_message(msg[1], msg[2])
                 elif kind == "engine_ok":
                     self.engine_status.configure(text=msg[1], foreground="#1a7f37")
                 elif kind == "engine_ng":
@@ -640,8 +673,8 @@ class VoiceChatApp:
                 shown += 1
             elif role == "assistant":
                 jp, zh = parse_reply(content)
-                self._append(f"AI（日）：{jp}\n", "jp")
-                self._append(f"AI（中）：{zh}\n\n" if zh else "\n", "zh" if zh else None)
+                # 註冊成可雙擊重播的訊息（只顯示不朗讀）
+                self._register_ai_message(jp, zh)
                 shown += 1
 
         self._append(
@@ -863,6 +896,26 @@ class VoiceChatApp:
         if not quiet:
             self._append("[已停止朗讀]\n", "sys")
 
+    def replay_message(self, tag):
+        """重新合成播放指定則 AI 回覆的日文內容。"""
+        jp = self.replay_texts.get(tag)
+        if not jp or self.busy:
+            if self.busy:
+                self._append("[目前有回覆處理中，請稍後再重播]\n", "sys")
+            return
+        if self.speaker_id is None:
+            self._append("[VOICEVOX 未連線，無法播放]\n", "sys")
+            return
+        self._append("[重新播放中…]\n", "sys")
+        self._emit("busy", True)
+        self.stop_requested = False
+
+        def worker():
+            self.speak(jp)
+            self._emit("busy", False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_close(self):
         self.stop_requested = True
         winsound.PlaySound(None, winsound.SND_PURGE)
@@ -974,11 +1027,7 @@ class VoiceChatApp:
         self.write_session_file()
 
         jp, zh = parse_reply(reply)
-        self._emit("text", f"AI（日）：{jp}\n", "jp")
-        if zh:
-            self._emit("text", f"AI（中）：{zh}\n\n", "zh")
-        else:
-            self._emit("text", "\n")
+        self._emit("ai_msg", jp, zh)
 
         self.speak(jp)
 
