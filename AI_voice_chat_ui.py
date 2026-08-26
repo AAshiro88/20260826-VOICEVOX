@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""VOICEVOX × Ollama 語音對話（Tkinter 圖形介面版）。
+"""VOICEVOX × Ollama／OpenRouter 語音對話（Tkinter 圖形介面版）。
 
 功能：
-- 啟動時自動偵測 VOICEVOX 引擎與 Ollama 狀態
+- 啟動時自動偵測 VOICEVOX 引擎與 Ollama／OpenRouter 狀態
 - 下拉選單只列出偏好的 3 個聲音：猫使ビィ、小夜/SAYO、もち子さん
-- 對話內容顯示於畫面，AI 回覆逐句合成播放，可中途停止朗讀
-- 可切換對話來源：本機 Ollama 或 OpenRouter 雲端 API（金鑰放在同目錄 .env）
+- 可切換對話來源：本機 Ollama 或 OpenRouter 免費模型（金鑰放在同目錄 .env）
+- 多重對話管理：每個對話存成 chats/ 下獨立 JSON（含當時聲音、服務與模型），
+  可開新對話、載入、改名、刪除；第一則回覆後會由 AI 自動取標題（可再手動改名）
+- 角色設定：寫入 persona.txt，套用後加入系統提示
+- 歷史過長時自動呼叫目前模型整理成摘要（整理中禁止送出新訊息）
+- AI 回覆逐句合成播放，可中途停止朗讀
 - VOICEVOX 只能正確朗讀日文，因此要求模型以「日:/中:」兩行格式回覆
 
 僅使用 Python 標準庫，不需安裝第三方套件。
@@ -22,16 +26,20 @@ import threading
 import urllib.parse
 import urllib.request
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
-from tkinter import scrolledtext, ttk
+from tkinter import messagebox, scrolledtext, simpledialog, ttk
 import winsound
 
 ENGINE_URL = "http://127.0.0.1:50021"
 OLLAMA_URL = "http://127.0.0.1:11434"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
-# 從與本檔案同目錄的 .env 讀取設定
+# 從與本檔案同目錄的 .env 讀取設定（金鑰等敏感資訊，不上 GIT）
 ENV_PATH = Path(__file__).with_name(".env")
+# 角色設定與對話紀錄（一般資料，可上 GIT）
+PERSONA_PATH = Path(__file__).with_name("persona.txt")
+CHATS_DIR = Path(__file__).with_name("chats")
 
 
 def load_env(path):
@@ -62,6 +70,17 @@ PREFERRED_MODELS = ["qwen3.6", "qwen3.5", "gemma4"]
 
 # OpenRouter 模型偏好關鍵字（用於預設選擇）
 PREFERRED_OPENROUTER_MODELS = ["ox-alpha", "gemini", "gpt", "claude"]
+
+# 只保留免費模型（:free 結尾）與 ox-alpha
+OPENROUTER_KEEP_FREE_ONLY = True
+
+# 歷史長度上限（字元數），超過就自動整理成摘要
+HISTORY_CHAR_LIMIT = 5000
+# 整理時保留最近的訊息則數（原文），其餘壓縮為摘要
+KEEP_RECENT_MESSAGES = 4
+
+# 新對話的預設名稱格式（時間戳），符合此格式的對話才會被 AI 自動取標題覆蓋
+DEFAULT_NAME_PATTERN = re.compile(r"^對話_\d{8}_\d{6}(_\d+)?$")
 
 SYSTEM_PROMPT = (
     "你是透過 VOICEVOX 語音合成與使用者對話的夥伴。VOICEVOX 只能朗讀日文，"
@@ -120,6 +139,28 @@ def split_sentences(text):
     return [p.strip() for p in parts if p.strip()]
 
 
+def sanitize_filename(name):
+    """移除 Windows 檔名不允許的字元並限制長度。"""
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "", str(name)).strip()
+    return (cleaned or "未命名")[:50]
+
+
+def clean_title(text):
+    """清理 AI 回傳的標題：去除引號、換行與非法字元，限制長度。"""
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    t = stripped.splitlines()[0]
+    t = t.strip(" \"'「」『』。．.,，！？!?")
+    t = sanitize_filename(t)
+    return t[:20] or None
+
+
+def now_iso():
+    """回傳目前時間（排序與顯示用）。"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 TMP_DIR = Path(tempfile.mkdtemp(prefix="vv_chat_ui_"))
 atexit.register(shutil.rmtree, TMP_DIR, ignore_errors=True)
 
@@ -127,11 +168,11 @@ atexit.register(shutil.rmtree, TMP_DIR, ignore_errors=True)
 class VoiceChatApp:
     def __init__(self, root):
         self.root = root
-        root.title("VOICEVOX × Ollama 語音對話")
-        root.geometry("800x560")
+        root.title("VOICEVOX × Ollama／OpenRouter 語音對話")
+        root.geometry("800x640")
 
         self.ui_queue = queue.Queue()
-        self.history = []
+        self.history = []  # 目前對話的訊息列表（與 current_session["history"] 同一物件）
         self.speaker_id = None
         self.model_name = ""
         self.provider = "ollama"
@@ -139,6 +180,20 @@ class VoiceChatApp:
         self.openrouter_models = []
         self.busy = False
         self.stop_requested = False
+
+        # 對話工作階段狀態
+        self.current_session = None  # dict：name/created_at/updated_at/speaker_id/provider/model/history
+        self.current_path = None  # 目前對話檔案路徑
+        self.session_paths = {}  # 名稱 → 檔案路徑
+        self.file_lock = threading.Lock()
+
+        # 角色設定（從 persona.txt 載入）
+        self.persona = ""
+        if PERSONA_PATH.exists():
+            try:
+                self.persona = PERSONA_PATH.read_text(encoding="utf-8").strip()
+            except Exception:
+                self.persona = ""
 
         self._build_widgets()
 
@@ -179,18 +234,46 @@ class VoiceChatApp:
         self.provider_box.bind("<<ComboboxSelected>>", self.on_provider_selected)
 
         ttk.Label(mid, text="聲音").pack(side="left")
-        self.voice_box = ttk.Combobox(mid, state="readonly", width=34)
+        self.voice_box = ttk.Combobox(mid, state="readonly", width=30)
         self.voice_box.pack(side="left", padx=(4, 16))
         self.voice_box.bind("<<ComboboxSelected>>", self.on_voice_selected)
 
         ttk.Label(mid, text="模型").pack(side="left")
-        self.model_box = ttk.Combobox(mid, width=24)
+        self.model_box = ttk.Combobox(mid, width=22)
         self.model_box.pack(side="left", padx=(4, 0))
         self.model_box.bind("<<ComboboxSelected>>", self.on_model_selected)
 
-        ttk.Button(mid, text="停止朗讀", command=self.stop_speaking).pack(
+        ttk.Button(mid, text="停止朗讀", command=lambda: self.stop_speaking()).pack(
             side="right", padx=4
         )
+
+        # 角色設定列
+        prow = ttk.Frame(self.root, padding=(6, 4))
+        prow.pack(fill="x")
+
+        ttk.Label(prow, text="角色").pack(side="left")
+        self.persona_entry = ttk.Entry(prow, font=("Microsoft JhengHei", 11))
+        self.persona_entry.pack(side="left", fill="x", expand=True, padx=(4, 6))
+        if self.persona:
+            self.persona_entry.insert(0, self.persona)
+        self.persona_entry.bind("<Return>", lambda e: self.apply_persona())
+        ttk.Button(prow, text="套用角色", command=self.apply_persona).pack(side="left")
+
+        # 對話管理列
+        srow = ttk.Frame(self.root, padding=(6, 0))
+        srow.pack(fill="x")
+
+        ttk.Label(srow, text="對話").pack(side="left")
+        self.session_box = ttk.Combobox(srow, state="readonly", width=30)
+        self.session_box.pack(side="left", padx=(4, 10))
+        self.new_btn = ttk.Button(srow, text="開新對話", command=self.new_session)
+        self.new_btn.pack(side="left", padx=(0, 4))
+        self.load_btn = ttk.Button(srow, text="載入", command=self.load_selected_session)
+        self.load_btn.pack(side="left", padx=(0, 4))
+        self.rename_btn = ttk.Button(srow, text="改名", command=self.rename_selected_session)
+        self.rename_btn.pack(side="left", padx=(0, 4))
+        self.delete_btn = ttk.Button(srow, text="刪除", command=self.delete_selected_session)
+        self.delete_btn.pack(side="left")
 
         self.chat = scrolledtext.ScrolledText(
             self.root, state="disabled", wrap="word", font=("Microsoft JhengHei", 11)
@@ -209,17 +292,20 @@ class VoiceChatApp:
         self.input_box.pack(side="left", fill="both", expand=True)
         self.input_box.bind("<Return>", self._on_return)
 
+        style = ttk.Style()
+        style.configure(
+            "Big.TButton", font=("Microsoft JhengHei", 12, "bold"), padding=(16, 12)
+        )
         self.send_button = ttk.Button(
-            bottom, text="送出", command=self.send_message
+            bottom, text="送出", command=self.send_message, style="Big.TButton"
         )
         self.send_button.pack(side="right", padx=(6, 0), anchor="se")
 
-    def _on_return(self, event):
-        """Enter 送出訊息；按住 Shift 時允許換行。"""
-        if event.state & 0x0001:
-            return None
-        self.send_message()
-        return "break"
+    def _clear_chat_display(self):
+        """清空對話顯示區。"""
+        self.chat.configure(state="normal")
+        self.chat.delete("1.0", "end")
+        self.chat.configure(state="disabled")
 
     def _append(self, text, tag=None):
         """在對話區附加文字（主執行緒呼叫）。"""
@@ -248,6 +334,10 @@ class VoiceChatApp:
                     self.ollama_status.configure(text=msg[1], foreground="#1a7f37")
                 elif kind == "ollama_ng":
                     self.ollama_status.configure(text=msg[1], foreground="#c62828")
+                elif kind == "or_ok":
+                    self.or_status.configure(text=msg[1], foreground="#1a7f37")
+                elif kind == "or_ng":
+                    self.or_status.configure(text=msg[1], foreground="#c62828")
                 elif kind == "voices":
                     self._load_voices(msg[1])
                 elif kind == "ollama_models":
@@ -258,13 +348,20 @@ class VoiceChatApp:
                     self.openrouter_models = msg[1]
                     if self.provider == "openrouter":
                         self._apply_models()
-                elif kind == "or_ok":
-                    self.or_status.configure(text=msg[1], foreground="#1a7f37")
-                elif kind == "or_ng":
-                    self.or_status.configure(text=msg[1], foreground="#c62828")
+                elif kind == "sessions":
+                    # msg：names, paths(dict name->str), select_name
+                    self.session_paths = {n: Path(p) for n, p in msg[2].items()}
+                    self.session_box.configure(values=msg[1])
+                    if msg[3] and msg[3] in msg[1]:
+                        self.session_box.set(msg[3])
+                elif kind == "restore":
+                    self.handle_restore(msg[1], msg[2])
                 elif kind == "busy":
                     self.busy = msg[1]
-                    self.send_button.configure(state="disabled" if self.busy else "normal")
+                    state = "disabled" if self.busy else "normal"
+                    self.send_button.configure(state=state)
+                    for btn in (self.new_btn, self.load_btn, self.rename_btn, self.delete_btn):
+                        btn.configure(state=state)
         except queue.Empty:
             pass
         self.root.after(100, self._poll_queue)
@@ -276,6 +373,7 @@ class VoiceChatApp:
     # ---------- 初始化 ----------
 
     def init_backend(self):
+        """背景檢查各服務並載入清單，最後還原上次的對話。"""
         # 檢查引擎並載入聲音清單
         try:
             version = http_json("/version", ENGINE_URL)
@@ -285,7 +383,7 @@ class VoiceChatApp:
             self._emit("engine_ng", "未連線")
             self._emit(
                 "text",
-                "無法連線 VOICEVOX 引擎。請先啟動 VOICEVOX.exe 再按右上角重試或重新開啟本程式。\n\n",
+                "無法連線 VOICEVOX 引擎。請先啟動 VOICEVOX.exe 後重新開啟本程式。\n\n",
                 "sys",
             )
             speakers = []
@@ -310,11 +408,7 @@ class VoiceChatApp:
             self._emit("ollama_models", models)
         except Exception:
             self._emit("ollama_ng", "未連線")
-            self._emit(
-                "text",
-                "無法連線 Ollama。請執行 ollama serve 或啟動 Ollama 應用程式。\n\n",
-                "sys",
-            )
+            self._emit("ollama_models", [])
 
         # 載入 OpenRouter 模型清單（公開端點，不需金鑰），只保留免費模型與 ox-alpha
         if not OPENROUTER_API_KEY:
@@ -323,14 +417,38 @@ class VoiceChatApp:
             data = http_json("/models", OPENROUTER_URL, timeout=20)
 
             def keep(model_id):
-                model_id = model_id.lower()
-                return model_id.endswith(":free") or "ox-alpha" in model_id
+                if not OPENROUTER_KEEP_FREE_ONLY:
+                    return True
+                lowered = model_id.lower()
+                return lowered.endswith(":free") or "ox-alpha" in lowered
 
             ids = sorted(m["id"] for m in data.get("data", []) if keep(m["id"]))
             self._emit("or_ok", "可用" + ("（金鑰已載入）" if OPENROUTER_API_KEY else "（未設金鑰）"))
             self._emit("or_models", ids)
         except Exception:
             self._emit("or_ng", "清單取得失敗")
+            self._emit("or_models", [])
+
+        # 掃描既有對話，準備還原最近使用的
+        CHATS_DIR.mkdir(exist_ok=True)
+        files = []
+        try:
+            files = sorted(
+                CHATS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+            )
+        except Exception:
+            pass
+        names = [p.stem for p in files]
+        paths = {p.stem: str(p) for p in files}
+        latest = None
+        if files:
+            try:
+                latest = (json.loads(files[0].read_text(encoding="utf-8")), str(files[0]))
+            except Exception:
+                latest = None
+        select = files[0].stem if files else None
+        self._emit("sessions", names, paths, select)
+        self._emit("restore", latest[0] if latest else None, latest[1] if latest else None)
 
     def _collect_voices(self, speakers):
         """組出聲音選項，只保留符合偏好關鍵字的 3 個聲音。"""
@@ -353,7 +471,7 @@ class VoiceChatApp:
         self.voice_box.configure(values=[v[0] for v in voices])
         if voices:
             self.voice_box.current(0)
-            self.on_voice_selected()
+            self.on_voice_selected(announce=False)
 
     def _apply_models(self):
         """依目前服務來源填入模型下拉選單並選擇預設模型。"""
@@ -364,6 +482,7 @@ class VoiceChatApp:
         )
         if not models:
             self.model_box.set("")
+            self.on_model_selected()
             return
         keys = PREFERRED_MODELS if self.provider == "ollama" else PREFERRED_OPENROUTER_MODELS
         default_index = next(
@@ -373,20 +492,293 @@ class VoiceChatApp:
         self.model_box.current(default_index)
         self.on_model_selected()
 
-    def on_provider_selected(self, event=None):
+    def on_provider_selected(self, event=None, announce=True):
         provider = self.provider_box.get()
         self.provider = "openrouter" if "OpenRouter" in provider else "ollama"
-        self._append(f"[已切換服務：{provider}]\n", "sys")
+        if announce:
+            self._append(f"[已切換服務：{provider}]\n", "sys")
         self._apply_models()
 
-    def on_voice_selected(self, event=None):
+    def on_voice_selected(self, event=None, announce=True):
         label = self.voice_box.get()
         if label in getattr(self, "voice_map", {}):
             self.speaker_id = self.voice_map[label]
-            self._append(f"[已選擇聲音 {label}]\n", "sys")
+            if announce:
+                self._append(f"[已選擇聲音 {label}]\n", "sys")
 
     def on_model_selected(self, event=None):
         self.model_name = self.model_box.get()
+
+    # ---------- 對話工作階段管理 ----------
+
+    def handle_restore(self, data, path_str):
+        """還原一個對話工作階段；data 為 None 時建立全新對話。"""
+        if not data:
+            self.new_session(first=True)
+            return
+
+        provider = data.get("provider")
+        if provider not in ("ollama", "openrouter"):
+            provider = "ollama"
+        history = data.get("history")
+        if not isinstance(history, list):
+            history = []
+
+        session = {
+            "name": data.get("name") or Path(path_str).stem,
+            "created_at": data.get("created_at") or now_iso(),
+            "updated_at": data.get("updated_at") or now_iso(),
+            "speaker_id": data.get("speaker_id"),
+            "provider": provider,
+            "model": data.get("model", ""),
+            "history": history,
+        }
+        self.current_session = session
+        self.current_path = Path(path_str)
+        self.history = session["history"]
+
+        self._clear_chat_display()
+
+        # 還原服務與模型
+        self.provider = provider
+        self.provider_box.current(1 if provider == "openrouter" else 0)
+        self._apply_models()
+        saved_model = session["model"]
+        if saved_model:
+            if provider == "openrouter":
+                self.model_box.set(saved_model)
+            elif saved_model in (self.ollama_models or []):
+                self.model_box.set(saved_model)
+            self.model_name = self.model_box.get()
+
+        # 還原聲音（若該 styleId 仍存在）
+        speaker_note = ""
+        sid = session["speaker_id"]
+        if isinstance(sid, int):
+            match = next((lbl for lbl, i in self.voice_map.items() if i == sid), None)
+            if match:
+                self.voice_box.set(match)
+                self.speaker_id = sid
+            else:
+                speaker_note = f"[注意：原聲音 styleId={sid} 不存在，維持目前選擇]\n"
+
+        # 重播歷史（不朗讀）；摘要用的 system 訊息不顯示
+        shown = 0
+        for m in history:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            content = m.get("content", "")
+            if role == "user":
+                self._append(f"你＞ {content}\n", "user")
+                shown += 1
+            elif role == "assistant":
+                jp, zh = parse_reply(content)
+                self._append(f"AI（日）：{jp}\n", "jp")
+                self._append(f"AI（中）：{zh}\n\n" if zh else "\n", "zh" if zh else None)
+                shown += 1
+
+        self._append(
+            f"[已載入對話「{session['name']}」，共 {shown} 則，可繼續聊]\n", "sys"
+        )
+        if speaker_note:
+            self._append(speaker_note, "sys")
+
+    def write_session_file(self):
+        """將目前對話（含當下聲音、服務、模型）寫入磁檔。"""
+        if self.current_session is None or self.current_path is None:
+            return
+        self.current_session["updated_at"] = now_iso()
+        self.current_session["speaker_id"] = self.speaker_id
+        self.current_session["provider"] = self.provider
+        self.current_session["model"] = self.model_name
+        payload = json.dumps(self.current_session, ensure_ascii=False, indent=2)
+        try:
+            with self.file_lock:
+                self.current_path.parent.mkdir(exist_ok=True)
+                tmp = self.current_path.with_suffix(".tmp")
+                tmp.write_text(payload, encoding="utf-8")
+                tmp.replace(self.current_path)
+        except Exception as e:
+            self._emit("text", f"（對話存檔失敗：{e}）\n", "sys")
+
+    def refresh_session_list(self, select=None):
+        """重掃 chats/ 更新下拉選單（主執行緒呼叫）。"""
+        CHATS_DIR.mkdir(exist_ok=True)
+        try:
+            files = sorted(
+                CHATS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+            )
+        except Exception:
+            files = []
+        self.session_paths = {p.stem: p for p in files}
+        names = [p.stem for p in files]
+        self.session_box.configure(values=names)
+        target = select or (self.current_path.stem if self.current_path else None)
+        if target in names:
+            self.session_box.set(target)
+        elif names:
+            self.session_box.set(names[0])
+        else:
+            self.session_box.set("")
+
+    def new_session(self, first=False):
+        """開新的空白對話；目前對話先存檔不遺失。"""
+        self.stop_requested = True
+        winsound.PlaySound(None, winsound.SND_PURGE)
+        if self.current_session is not None:
+            self.write_session_file()
+
+        CHATS_DIR.mkdir(exist_ok=True)
+        base = sanitize_filename(datetime.now().strftime("對話_%Y%m%d_%H%M%S"))
+        candidate = CHATS_DIR / f"{base}.json"
+        n = 2
+        while candidate.exists():
+            candidate = CHATS_DIR / f"{base}_{n}.json"
+            n += 1
+
+        self.current_session = {
+            "name": candidate.stem,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+            "speaker_id": self.speaker_id,
+            "provider": self.provider,
+            "model": self.model_name,
+            "history": [],
+        }
+        self.history = self.current_session["history"]
+        self.current_path = candidate
+        self.write_session_file()
+        self.refresh_session_list(select=candidate.stem)
+        self._clear_chat_display()
+        if not first:
+            self._append(f"[已開新對話：{candidate.stem}]\n", "sys")
+
+    def load_selected_session(self):
+        """載入下拉選單選中的對話。"""
+        if self.busy:
+            return
+        name = self.session_box.get()
+        path = self.session_paths.get(name)
+        if path is None:
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data.get("history", []), list):
+                raise ValueError("history 格式錯誤")
+        except Exception as e:
+            self._append(f"[載入失敗：{e}]\n", "sys")
+            return
+        self.handle_restore(data, str(path))
+        self.session_box.set(name)
+
+    def rename_selected_session(self):
+        """以輸入框重新命名選中的對話。"""
+        if self.busy:
+            return
+        name = self.session_box.get()
+        old_path = self.session_paths.get(name)
+        if not name or old_path is None:
+            return
+        new = simpledialog.askstring(
+            "重新命名對話", "新的對話名稱：", initialvalue=name, parent=self.root
+        )
+        if not new or new.strip() == name:
+            return
+        stem = sanitize_filename(new.strip())
+        new_path = CHATS_DIR / f"{stem}.json"
+        if new_path.exists():
+            self._append("[已有同名對話，改名取消]\n", "sys")
+            return
+        try:
+            with self.file_lock:
+                old_path.rename(new_path)
+        except Exception as e:
+            self._append(f"[改名失敗：{e}]\n", "sys")
+            return
+        if self.current_path == old_path:
+            self.current_path = new_path
+            self.current_session["name"] = stem
+            self.write_session_file()
+        self.refresh_session_list(select=stem)
+        self._append(f"[已改名：「{name}」→「{stem}」]\n", "sys")
+
+    def delete_selected_session(self):
+        """刪除選中的對話檔案；若是目前對話則另開新對話。"""
+        if self.busy:
+            return
+        name = self.session_box.get()
+        path = self.session_paths.get(name)
+        if path is None:
+            return
+        if not messagebox.askyesno(
+            "刪除對話", f"確定要刪除「{name}」嗎？\n此動作無法復原。", parent=self.root
+        ):
+            return
+        try:
+            path.unlink()
+        except Exception as e:
+            self._append(f"[刪除失敗：{e}]\n", "sys")
+            return
+        if self.current_path == path:
+            self.current_session = None
+            self.current_path = None
+            self.history = []
+            self.new_session()
+            self._append(f"[已刪除「{name}」，並自動開了新對話]\n", "sys")
+        else:
+            self.refresh_session_list()
+            self._append(f"[已刪除「{name}」]\n", "sys")
+
+    def _rename_active_to(self, new_name, announce=True):
+        """重新命名目前作用中的對話（含檔案搬移與清單更新）。"""
+        if self.current_session is None or self.current_path is None:
+            return
+        stem = sanitize_filename(new_name)
+        old_path = self.current_path
+        new_path = CHATS_DIR / f"{stem}.json"
+        if new_path == old_path:
+            return
+        if new_path.exists():
+            if announce:
+                self._append(f"[命名失敗：已有同名對話「{stem}」]\n", "sys")
+            return
+        try:
+            with self.file_lock:
+                old_path.rename(new_path)
+        except Exception as e:
+            if announce:
+                self._append(f"[命名失敗：{e}]\n", "sys")
+            return
+        self.current_path = new_path
+        self.current_session["name"] = stem
+        self.write_session_file()
+        self.refresh_session_list(select=stem)
+        if announce:
+            self._append(f"[已命名為「{stem}」]\n", "sys")
+
+    # ---------- 角色設定 ----------
+
+    def apply_persona(self):
+        """套用角色設定：寫入 persona.txt 並立即生效於下一則訊息。"""
+        text = self.persona_entry.get().strip()
+        self.persona = text
+        try:
+            PERSONA_PATH.write_text(text, encoding="utf-8")
+            saved = "（已存入 persona.txt）"
+        except Exception:
+            saved = "（persona.txt 寫入失敗，僅本次生效）"
+        if text:
+            self._append(f"[角色設定已套用：{text}]{saved}\n", "sys")
+        else:
+            self._append(f"[已清除角色設定，回到預設]{saved}\n", "sys")
+
+    def build_system_prompt(self):
+        """組出系統提示：格式規範在前，角色設定在後（避免破壞輸出格式）。"""
+        prompt = SYSTEM_PROMPT
+        if self.persona:
+            prompt += f"\n角色設定：{self.persona}"
+        return prompt
 
     # ---------- 事件 ----------
 
@@ -398,7 +790,7 @@ class VoiceChatApp:
             self._append("[請先確認 VOICEVOX 引擎已啟動]\n", "sys")
             return
         if not self.model_name:
-            self._append("[請先確認 Ollama 已啟動且有可用模型]\n", "sys")
+            self._append("[請先確認 Ollama／OpenRouter 已啟動且有可用模型]\n", "sys")
             return
 
         self.input_box.delete("1.0", "end")
@@ -407,19 +799,96 @@ class VoiceChatApp:
         self.stop_requested = False
         threading.Thread(target=self.chat_worker, args=(user_text,), daemon=True).start()
 
-    def stop_speaking(self):
+    def stop_speaking(self, quiet=False):
         self.stop_requested = True
         winsound.PlaySound(None, winsound.SND_PURGE)
-        self._append("[已停止朗讀]\n", "sys")
+        if not quiet:
+            self._append("[已停止朗讀]\n", "sys")
 
     def on_close(self):
         self.stop_requested = True
         winsound.PlaySound(None, winsound.SND_PURGE)
+        try:
+            self.write_session_file()
+        except Exception:
+            pass
         self.root.destroy()
 
-    # ---------- 背景：對話與合成 ----------
+    # ---------- 背景：對話、摘要、標題與合成 ----------
+
+    def call_llm(self, messages, provider=None, model=None, timeout=300):
+        """依指定（預設為目前）的服務與模型呼叫聊天 API，回傳純文字。"""
+        use_provider = provider or self.provider
+        use_model = model or self.model_name
+        if use_provider == "ollama":
+            resp = post_json(
+                "/api/chat",
+                OLLAMA_URL,
+                payload={"model": use_model, "messages": messages, "stream": False},
+                timeout=timeout,
+            )
+            return json.loads(resp.decode("utf-8"))["message"]["content"]
+        resp = post_json(
+            "/chat/completions",
+            OPENROUTER_URL,
+            payload={"model": use_model, "messages": messages},
+            headers={
+                # 金鑰只存在記憶體中傳遞，不寫入任何輸出
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "http://localhost",
+                "X-Title": "VOICEVOX-Ollama-Chat",
+            },
+            timeout=timeout,
+        )
+        return json.loads(resp.decode("utf-8"))["choices"][0]["message"]["content"]
+
+    def maybe_summarize(self):
+        """歷史超過上限時，呼叫目前模型把舊訊息壓縮成摘要。
+
+        進行中會顯示提示且因忙碌鎖無法再送出新訊息；
+        失敗時不阻擋對話，改用完整歷史繼續。
+        """
+        total_chars = sum(
+            len(m.get("content", ""))
+            for m in self.history
+            if isinstance(m, dict) and isinstance(m.get("content"), str)
+        )
+        if total_chars <= HISTORY_CHAR_LIMIT:
+            return
+        if len(self.history) <= KEEP_RECENT_MESSAGES:
+            return
+
+        self._emit("text", "[對話過長，整理歷史中，請稍候…（此時無法送出訊息）]\n", "sys")
+        older = self.history[:-KEEP_RECENT_MESSAGES]
+        transcript = "\n".join(
+            f"{'使用者' if m.get('role') == 'user' else 'AI'}：{m.get('content', '')}"
+            for m in older
+            if m.get("role") in ("user", "assistant")
+        )
+        ask = (
+            "請將以下人機對話整理成重點摘要，保留重要事實、決定與約定，"
+            "以繁體中文簡短輸出，不要逐字羅列。\n\n" + transcript
+        )
+        try:
+            summary = self.call_llm(
+                [{"role": "user", "content": ask}], timeout=120
+            ).strip()
+        except Exception as e:
+            self._emit("text", f"[摘要失敗，改用完整歷史繼續（{e}）]\n", "sys")
+            return
+        if not summary:
+            self._emit("text", "[摘要為空，改用完整歷史繼續]\n", "sys")
+            return
+
+        self.history[:] = (
+            [{"role": "system", "content": f"以下是更早對話的重點摘要：\n{summary}"}]
+            + self.history[-KEEP_RECENT_MESSAGES:]
+        )
+        self.write_session_file()
+        self._emit("text", "[整理完成，舊歷史已壓縮為摘要]\n", "sys")
 
     def chat_worker(self, user_text):
+        """處理一次完整的對話回合：摘要檢查 → 呼叫模型 → 存檔 → 朗讀。"""
         if self.provider == "openrouter" and not OPENROUTER_API_KEY:
             self._emit(
                 "text",
@@ -430,36 +899,13 @@ class VoiceChatApp:
             return
 
         self.history.append({"role": "user", "content": user_text})
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.history
 
+        # 歷史過長先整理（期間忙碌鎖維持，無法送出新訊息）
+        self.maybe_summarize()
+
+        messages = [{"role": "system", "content": self.build_system_prompt()}] + self.history
         try:
-            if self.provider == "ollama":
-                resp = post_json(
-                    "/api/chat",
-                    OLLAMA_URL,
-                    payload={
-                        "model": self.model_name,
-                        "messages": messages,
-                        "stream": False,
-                    },
-                    timeout=300,
-                )
-                reply = json.loads(resp.decode("utf-8"))["message"]["content"]
-            else:
-                # OpenRouter 採用 OpenAI 相容格式
-                resp = post_json(
-                    "/chat/completions",
-                    OPENROUTER_URL,
-                    payload={"model": self.model_name, "messages": messages},
-                    headers={
-                        # 金鑰只存在記憶體中傳遞，不寫入任何輸出
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "HTTP-Referer": "http://localhost",
-                        "X-Title": "VOICEVOX-Ollama-Chat",
-                    },
-                    timeout=300,
-                )
-                reply = json.loads(resp.decode("utf-8"))["choices"][0]["message"]["content"]
+            reply = self.call_llm(messages)
         except Exception as e:
             self.history.pop()
             self._emit("text", f"（呼叫對話服務失敗：{e}）\n", "sys")
@@ -467,6 +913,8 @@ class VoiceChatApp:
             return
 
         self.history.append({"role": "assistant", "content": reply})
+        self.write_session_file()
+
         jp, zh = parse_reply(reply)
         self._emit("text", f"AI（日）：{jp}\n", "jp")
         if zh:
@@ -475,7 +923,56 @@ class VoiceChatApp:
             self._emit("text", "\n")
 
         self.speak(jp)
+
+        # 第一則回覆後，背景向目前模型索取對話標題
+        assistant_count = sum(1 for m in self.history if m.get("role") == "assistant")
+        if (
+            assistant_count == 1
+            and self.current_session is not None
+            and DEFAULT_NAME_PATTERN.match(self.current_session["name"])
+        ):
+            threading.Thread(target=self.auto_title_worker, daemon=True).start()
+
         self._emit("busy", False)
+
+    def auto_title_worker(self):
+        """以第一則對話內容向目前模型索取短標題；失敗則保留時間戳名稱。"""
+        session = self.current_session
+        if session is None:
+            return
+        provider = self.provider
+        model = self.model_name
+        user_text = next(
+            (m.get("content", "") for m in session["history"] if m.get("role") == "user"),
+            "",
+        )
+        ai_text = next(
+            (m.get("content", "") for m in session["history"] if m.get("role") == "assistant"),
+            "",
+        )
+        ask = (
+            "請根據以下對話開頭取一個 4 到 10 個字的繁體中文標題，"
+            "直接輸出標題本身，不要引號、句號或任何說明。\n\n"
+            f"使用者：{user_text}\nAI：{ai_text}"
+        )
+        try:
+            title = self.call_llm(
+                [{"role": "user", "content": ask}],
+                provider=provider,
+                model=model,
+                timeout=90,
+            )
+        except Exception:
+            return
+        title = clean_title(title)
+        if not title:
+            return
+        # 若使用者已手動改名或切換到別的對話，就不要覆蓋
+        if self.current_session is not session:
+            return
+        if not DEFAULT_NAME_PATTERN.match(session["name"]):
+            return
+        self.root.after(0, lambda: self._rename_active_to(title, announce=True))
 
     def speak(self, text):
         """逐句合成並同步播放；可由停止按鈕中斷。"""
