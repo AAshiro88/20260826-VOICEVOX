@@ -1031,8 +1031,9 @@ class VoiceChatApp:
                         self.session_box.set(msg[3])
                 elif kind == "restore":
                     self.handle_restore(msg[1], msg[2])
+                    # 只要歷史裡有內容（含呼叫失敗後留下的待重送訊息）就可以重新生成
                     self.retry_btn.configure(
-                        state="disabled" if self.displayed_asst_count == 0 else "normal"
+                        state="disabled" if not self.history else "normal"
                     )
                 elif kind == "busy":
                     self.busy = msg[1]
@@ -1042,9 +1043,10 @@ class VoiceChatApp:
                         btn.configure(state=state)
         except queue.Empty:
             pass
-        # retry 按鈕：忙碌中或無 AI 回覆時 disable
+        # retry 按鈕：忙碌中或歷史為空時 disable；
+        # 呼叫失敗後歷史仍保留待重送的使用者訊息，因此不能只看 displayed_asst_count
         self.retry_btn.configure(
-            state="disabled" if self.busy or self.displayed_asst_count == 0 else "normal"
+            state="disabled" if self.busy or not self.history else "normal"
         )
         self.root.after(100, self._poll_queue)
 
@@ -1518,27 +1520,35 @@ class VoiceChatApp:
             self._append(tr("msg_stopped"), "sys")
 
     def retry_last(self):
-        """移除最後一則 AI 回覆，用最後一則 user 訊息重新生成。"""
+        """重新生成，涵蓋兩種情況：
+
+        1. 上一次呼叫失敗：該則使用者訊息仍留在歷史最後（chat_worker 失敗時
+           不會移除它），直接重送即可，不需要刪除任何內容。
+        2. 上一次呼叫成功但不滿意：歷史最後是 assistant 回覆，移除該回覆後，
+           歷史最後即為要重送的 user 訊息。
+        """
         if self.busy:
             self._append(tr("msg_busy_retry"), "sys")
             return
-        # 找最後一個 user 訊息（用來重送）
-        last_user = None
-        for m in reversed(self.history):
-            if m.get("role") == "user":
-                last_user = m.get("content", "")
-                break
-        if last_user is None:
+        if not self.history:
             self._append(tr("msg_nothing_retry"), "sys")
             return
-        # 移除最後一個 assistant 回覆
-        for i in range(len(self.history) - 1, -1, -1):
-            if self.history[i].get("role") == "assistant":
-                self.history.pop(i)
-                break
+
+        last = self.history[-1]
+        if last.get("role") == "assistant":
+            # 對回覆不滿意：移除最後一則 assistant 回覆
+            self.history.pop()
+            if not self.history or self.history[-1].get("role") != "user":
+                self._append(tr("msg_nothing_retry"), "sys")
+                return
+            last_user = self.history[-1].get("content", "")
+        elif last.get("role") == "user":
+            # 上一次呼叫失敗：訊息本來就還在歷史裡，不需要刪除
+            last_user = last.get("content", "")
         else:
             self._append(tr("msg_nothing_retry"), "sys")
             return
+
         # 重繪顯示（清除後重畫整個歷史）
         self._clear_chat_display()
         self.displayed_asst_count = 0
@@ -1554,7 +1564,10 @@ class VoiceChatApp:
         self._append(tr("msg_retrying"), "sys")
         self._emit("busy", True)
         self.stop_requested = False
-        threading.Thread(target=self.chat_worker, args=(last_user,), daemon=True).start()
+        # 該則 user 訊息已經在歷史中，chat_worker 不需要再加入一次
+        threading.Thread(
+            target=self.chat_worker, args=(last_user,), kwargs={"append_user": False}, daemon=True
+        ).start()
 
     def replay_message(self, tag):
         """重新合成播放指定則 AI 回覆的朗讀內容。"""
@@ -1664,14 +1677,20 @@ class VoiceChatApp:
         self.write_session_file()
         self._emit("text", tr("msg_summary_done"), "sys")
 
-    def chat_worker(self, user_text):
-        """處理一次完整的對話回合：摘要檢查 → 呼叫模型 → 存檔 → 朗讀。"""
+    def chat_worker(self, user_text, append_user=True):
+        """處理一次完整的對話回合：摘要檢查 → 呼叫模型 → 存檔 → 朗讀。
+
+        append_user 為 True（一般送出訊息）時才會把 user_text 加進歷史；
+        重新生成時該則使用者訊息已經在歷史裡（見 retry_last），
+        傳入 False 避免重複加入。
+        """
         if self.provider == "openrouter" and not OPENROUTER_API_KEY:
             self._emit("text", tr("msg_no_key"), "sys")
             self._emit("busy", False)
             return
 
-        self.history.append({"role": "user", "content": user_text})
+        if append_user:
+            self.history.append({"role": "user", "content": user_text})
 
         # 歷史過長先整理（期間忙碌鎖維持，無法送出新訊息）
         self.maybe_summarize()
@@ -1683,7 +1702,8 @@ class VoiceChatApp:
         try:
             reply = self.call_llm(messages)
         except Exception as e:
-            self.history.pop()
+            # 呼叫失敗時保留使用者訊息，不從歷史移除，
+            # 讓「重新生成」可以直接重試該則訊息，而不會誤刪前一則已成功的回覆
             self._emit("text", tr("msg_llm_failed").format(e), "sys")
             self._emit("busy", False)
             return
