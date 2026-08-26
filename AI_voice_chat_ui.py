@@ -7,6 +7,8 @@
 - 可切換對話來源：本機 Ollama 或 OpenRouter 免費模型（金鑰放在同目錄 .env）
 - 多重對話管理：每個對話存成 chats/ 下獨立 JSON（含當時聲音、服務與模型），
   可開新對話、載入、改名、刪除；第一則回覆後會由 AI 自動取標題（可再手動改名）
+  檔名一律為 chat_日期_時間_毫秒.json（不含文字）；顯示名稱存在檔案內容中，
+  允許多個對話同名，清單會自動以（2）（3）區分
 - 角色設定：寫入 persona.txt，套用後加入系統提示
 - 歷史過長時自動呼叫目前模型整理成摘要（整理中禁止送出新訊息）
 - AI 回覆逐句合成播放，可中途停止朗讀
@@ -159,6 +161,63 @@ def clean_title(text):
 def now_iso():
     """回傳目前時間（排序與顯示用）。"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# 已發放的對話檔名（程序內防碰撞；跨程序靠磁碟存在檢查）
+_ISSUED_CHAT_PATHS = set()
+
+
+def new_chat_filename():
+    """產生新的對話檔名：chat_日期_時間_毫秒.json（不含任何文字名稱）。
+
+    同一毫秒內重複發放或磁碟已有同名時自動加流水號，確保不覆蓋既有檔案。
+    """
+    CHATS_DIR.mkdir(exist_ok=True)
+    base = datetime.now().strftime("chat_%Y%m%d_%H%M%S_%f")[:-3]
+    path = CHATS_DIR / f"{base}.json"
+    n = 2
+    while path in _ISSUED_CHAT_PATHS or path.exists():
+        path = CHATS_DIR / f"{base}_{n}.json"
+        n += 1
+    _ISSUED_CHAT_PATHS.add(path)
+    return path
+
+
+def scan_chat_files():
+    """掃描 chats/ 目錄，回傳按更新時間排序的（顯示名稱, 路徑）清單。
+
+    顯示名稱取自檔案內容的 name 欄位；讀取失敗或舊格式檔案改用檔名。
+    允許多個對話同名，顯示時自動以（2）（3）區分。
+    """
+    CHATS_DIR.mkdir(exist_ok=True)
+    try:
+        files = sorted(
+            CHATS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+    except Exception:
+        return []
+    result = []
+    seen = {}
+    for p in files:
+        name = None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                n = data.get("name")
+                if isinstance(n, str) and n.strip():
+                    name = n.strip()
+        except Exception:
+            name = None
+        if not name:
+            name = p.stem
+        if name in seen:
+            seen[name] += 1
+            disp = f"{name}（{seen[name]}）"
+        else:
+            seen[name] = 1
+            disp = name
+        result.append((disp, p))
+    return result
 
 
 TMP_DIR = Path(tempfile.mkdtemp(prefix="vv_chat_ui_"))
@@ -430,23 +489,17 @@ class VoiceChatApp:
             self._emit("or_models", [])
 
         # 掃描既有對話，準備還原最近使用的
-        CHATS_DIR.mkdir(exist_ok=True)
-        files = []
-        try:
-            files = sorted(
-                CHATS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
-            )
-        except Exception:
-            pass
-        names = [p.stem for p in files]
-        paths = {p.stem: str(p) for p in files}
+        pairs = scan_chat_files()
+        names = [d for d, _ in pairs]
+        paths = {d: str(p) for d, p in pairs}
         latest = None
-        if files:
+        if pairs:
+            disp, p = pairs[0]
             try:
-                latest = (json.loads(files[0].read_text(encoding="utf-8")), str(files[0]))
+                latest = (json.loads(p.read_text(encoding="utf-8")), str(p))
             except Exception:
                 latest = None
-        select = files[0].stem if files else None
+        select = names[0] if pairs else None
         self._emit("sessions", names, paths, select)
         self._emit("restore", latest[0] if latest else None, latest[1] if latest else None)
 
@@ -604,17 +657,11 @@ class VoiceChatApp:
 
     def refresh_session_list(self, select=None):
         """重掃 chats/ 更新下拉選單（主執行緒呼叫）。"""
-        CHATS_DIR.mkdir(exist_ok=True)
-        try:
-            files = sorted(
-                CHATS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
-            )
-        except Exception:
-            files = []
-        self.session_paths = {p.stem: p for p in files}
-        names = [p.stem for p in files]
+        pairs = scan_chat_files()
+        self.session_paths = {d: p for d, p in pairs}
+        names = [d for d, _ in pairs]
         self.session_box.configure(values=names)
-        target = select or (self.current_path.stem if self.current_path else None)
+        target = select or (self.current_session["name"] if self.current_session else None)
         if target in names:
             self.session_box.set(target)
         elif names:
@@ -623,22 +670,20 @@ class VoiceChatApp:
             self.session_box.set("")
 
     def new_session(self, first=False):
-        """開新的空白對話；目前對話先存檔不遺失。"""
+        """開新的空白對話；目前對話先存檔不遺失。
+
+        檔名為 chat_日期_時間_毫秒.json；顯示名稱預設為時間戳，之後可改名。
+        """
         self.stop_requested = True
         winsound.PlaySound(None, winsound.SND_PURGE)
         if self.current_session is not None:
             self.write_session_file()
 
-        CHATS_DIR.mkdir(exist_ok=True)
-        base = sanitize_filename(datetime.now().strftime("對話_%Y%m%d_%H%M%S"))
-        candidate = CHATS_DIR / f"{base}.json"
-        n = 2
-        while candidate.exists():
-            candidate = CHATS_DIR / f"{base}_{n}.json"
-            n += 1
+        path = new_chat_filename()
+        display_name = datetime.now().strftime("對話_%Y%m%d_%H%M%S")
 
         self.current_session = {
-            "name": candidate.stem,
+            "name": display_name,
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "speaker_id": self.speaker_id,
@@ -647,12 +692,12 @@ class VoiceChatApp:
             "history": [],
         }
         self.history = self.current_session["history"]
-        self.current_path = candidate
+        self.current_path = path
         self.write_session_file()
-        self.refresh_session_list(select=candidate.stem)
+        self.refresh_session_list(select=display_name)
         self._clear_chat_display()
         if not first:
-            self._append(f"[已開新對話：{candidate.stem}]\n", "sys")
+            self._append(f"[已開新對話：{display_name}]\n", "sys")
 
     def load_selected_session(self):
         """載入下拉選單選中的對話。"""
@@ -673,35 +718,39 @@ class VoiceChatApp:
         self.session_box.set(name)
 
     def rename_selected_session(self):
-        """以輸入框重新命名選中的對話。"""
+        """重新命名選中的對話；只改檔案內的顯示名稱，檔名不變。"""
         if self.busy:
             return
-        name = self.session_box.get()
-        old_path = self.session_paths.get(name)
-        if not name or old_path is None:
+        disp = self.session_box.get()
+        path = self.session_paths.get(disp)
+        if not disp or path is None:
             return
+        # 若顯示名稱帶有同名區分編號（如「名稱（2）」），輸入框先去掉它
+        base_name = re.sub(r"（\d+）$", "", disp)
         new = simpledialog.askstring(
-            "重新命名對話", "新的對話名稱：", initialvalue=name, parent=self.root
+            "重新命名對話", "新的對話名稱：", initialvalue=base_name, parent=self.root
         )
-        if not new or new.strip() == name:
+        if not new or new.strip() == base_name or not new.strip():
             return
-        stem = sanitize_filename(new.strip())
-        new_path = CHATS_DIR / f"{stem}.json"
-        if new_path.exists():
-            self._append("[已有同名對話，改名取消]\n", "sys")
-            return
-        try:
-            with self.file_lock:
-                old_path.rename(new_path)
-        except Exception as e:
-            self._append(f"[改名失敗：{e}]\n", "sys")
-            return
-        if self.current_path == old_path:
-            self.current_path = new_path
-            self.current_session["name"] = stem
+        new_name = " ".join(new.split())
+        if self.current_path == path and self.current_session is not None:
+            self.current_session["name"] = new_name
             self.write_session_file()
-        self.refresh_session_list(select=stem)
-        self._append(f"[已改名：「{name}」→「{stem}」]\n", "sys")
+        else:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data["name"] = new_name
+                with self.file_lock:
+                    tmp = path.with_suffix(".tmp")
+                    tmp.write_text(
+                        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    tmp.replace(path)
+            except Exception as e:
+                self._append(f"[改名失敗：{e}]\n", "sys")
+                return
+        self.refresh_session_list(select=new_name)
+        self._append(f"[已改名：「{base_name}」→「{new_name}」]\n", "sys")
 
     def delete_selected_session(self):
         """刪除選中的對話檔案；若是目前對話則另開新對話。"""
@@ -730,32 +779,15 @@ class VoiceChatApp:
             self.refresh_session_list()
             self._append(f"[已刪除「{name}」]\n", "sys")
 
-    def _rename_active_to(self, new_name, announce=True):
-        """重新命名目前作用中的對話（含檔案搬移與清單更新）。"""
-        if self.current_session is None or self.current_path is None:
+    def _rename_active_to(self, new_title, announce=True):
+        """重新命名目前作用中的對話（只改顯示名稱，檔名不變）。"""
+        if self.current_session is None:
             return
-        stem = sanitize_filename(new_name)
-        old_path = self.current_path
-        new_path = CHATS_DIR / f"{stem}.json"
-        if new_path == old_path:
-            return
-        if new_path.exists():
-            if announce:
-                self._append(f"[命名失敗：已有同名對話「{stem}」]\n", "sys")
-            return
-        try:
-            with self.file_lock:
-                old_path.rename(new_path)
-        except Exception as e:
-            if announce:
-                self._append(f"[命名失敗：{e}]\n", "sys")
-            return
-        self.current_path = new_path
-        self.current_session["name"] = stem
+        self.current_session["name"] = new_title
         self.write_session_file()
-        self.refresh_session_list(select=stem)
+        self.refresh_session_list(select=new_title)
         if announce:
-            self._append(f"[已命名為「{stem}」]\n", "sys")
+            self._append(f"[已命名為「{new_title}」]\n", "sys")
 
     # ---------- 角色設定 ----------
 
