@@ -10,7 +10,7 @@
 - **雙來源 LLM**：一鍵切換本機 Ollama 或 OpenRouter（模型清單只保留免費模型與 ox-alpha）
 - **多重對話管理**：每個對話存成獨立 JSON，可開新對話、載入、改名、刪除；記錄當下使用的聲音／服務／模型，載入時自動還原
 - **自動命名**：新對話先以時間戳命名，第一則回覆後由 AI 自動取標題，之後可手動改名；允許多個對話同名（清單自動加編號區分）
-- **角色設定**：自訂 AI 人設（例如「傲嬌的妹妹」），存於 persona.txt
+- **角色設定**：自訂 AI 人設（例如「傲嬌的妹妹」），跟著對話一起存在 chats/*.json，載入對話即還原人設
 - **歷史自動摘要**：對話過長時自動呼叫目前模型整理成重點摘要＋保留最近數則原文；整理中暫停接受新訊息
 - **日中雙語顯示**：AI 以「日:（朗讀）／中:（翻譯）」兩行回覆，看得到也聽得到
 
@@ -22,8 +22,7 @@
 ├─ ollama_voice_chat.py     舊版純命令列介面（僅支援 Ollama，保留備用）
 ├─ voicevox_api_test.py     VOICEVOX 引擎 API 連通測試腳本
 ├─ .env                     OPENROUTER_API_KEY（金鑰，不上 GIT）
-├─ persona.txt              角色設定（套用後產生）
-└─ chats/                   對話紀錄（chat_日期_時間_毫秒.json）
+└─ chats/                   對話紀錄（chat_日期_時間_毫秒.json，含角色設定）
 ```
 
 ## 環境需求
@@ -110,6 +109,7 @@ python ollama_voice_chat.py
   "speaker_id": 46,
   "provider": "openrouter",
   "model": "stealth/ox-alpha",
+  "persona": "傲嬌的妹妹",
   "history": [
     { "role": "user", "content": "你好" },
     { "role": "assistant", "content": "日: ...\n中: ..." },
@@ -118,7 +118,7 @@ python ollama_voice_chat.py
 }
 ```
 
-`history` 中 role 為 system 的項目是自動摘要產物，載入重播時不顯示。
+`history` 中 role 為 system 的項目是自動摘要產物，載入重播時不顯示。`persona` 是該對話專屬的角色設定，載入時自動還原到介面輸入框。
 
 ## 常見問題
 
@@ -141,4 +141,4 @@ python ollama_voice_chat.py
 - `VOICEVOX/`、`voicevox_engine-master/`、各壓縮檔——龐大的二進位資產
 - `__pycache__/`
 
-`persona.txt` 與 `chats/` 屬一般資料，預設會納入版本控制；若對話內容涉及隱私，請自行將 `chats/` 加入 `.gitignore`。
+`chats/` 屬一般資料，預設會納入版本控制；若對話內容涉及隱私，請自行將 `chats/` 加入 `.gitignore`。

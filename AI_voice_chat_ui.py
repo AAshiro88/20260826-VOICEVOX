@@ -9,7 +9,8 @@
   可開新對話、載入、改名、刪除；第一則回覆後會由 AI 自動取標題（可再手動改名）
   檔名一律為 chat_日期_時間_毫秒.json（不含文字）；顯示名稱存在檔案內容中，
   允許多個對話同名，清單會自動以（2）（3）區分
-- 角色設定：寫入 persona.txt，套用後加入系統提示
+- 角色設定：自訂 AI 人設（例如「傲嬌的妹妹」），隨對話存進 chats/*.json，
+  載入對話時一併還原
 - 歷史過長時自動呼叫目前模型整理成摘要（整理中禁止送出新訊息）
 - AI 回覆逐句合成播放，可中途停止朗讀
 - VOICEVOX 只能正確朗讀日文，因此要求模型以「日:/中:」兩行格式回覆
@@ -39,8 +40,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
 # 從與本檔案同目錄的 .env 讀取設定（金鑰等敏感資訊，不上 GIT）
 ENV_PATH = Path(__file__).with_name(".env")
-# 角色設定與對話紀錄（一般資料，可上 GIT）
-PERSONA_PATH = Path(__file__).with_name("persona.txt")
+# 對話紀錄（一般資料，可上 GIT）；角色設定存於各對話檔內，無獨立設定檔
 CHATS_DIR = Path(__file__).with_name("chats")
 
 
@@ -246,13 +246,8 @@ class VoiceChatApp:
         self.session_paths = {}  # 名稱 → 檔案路徑
         self.file_lock = threading.Lock()
 
-        # 角色設定（從 persona.txt 載入）
+        # 角色設定：屬於各對話工作階段，存取皆透過 current_session["persona"]
         self.persona = ""
-        if PERSONA_PATH.exists():
-            try:
-                self.persona = PERSONA_PATH.read_text(encoding="utf-8").strip()
-            except Exception:
-                self.persona = ""
 
         self._build_widgets()
 
@@ -313,8 +308,6 @@ class VoiceChatApp:
         ttk.Label(prow, text="角色").pack(side="left")
         self.persona_entry = ttk.Entry(prow, font=("Microsoft JhengHei", 11))
         self.persona_entry.pack(side="left", fill="x", expand=True, padx=(4, 6))
-        if self.persona:
-            self.persona_entry.insert(0, self.persona)
         self.persona_entry.bind("<Return>", lambda e: self.apply_persona())
         ttk.Button(prow, text="套用角色", command=self.apply_persona).pack(side="left")
 
@@ -584,6 +577,7 @@ class VoiceChatApp:
             "speaker_id": data.get("speaker_id"),
             "provider": provider,
             "model": data.get("model", ""),
+            "persona": data.get("persona", "") if isinstance(data.get("persona"), str) else "",
             "history": history,
         }
         self.current_session = session
@@ -591,6 +585,12 @@ class VoiceChatApp:
         self.history = session["history"]
 
         self._clear_chat_display()
+
+        # 還原角色設定到輸入框與記憶體
+        self.persona = session["persona"]
+        self.persona_entry.delete(0, "end")
+        if self.persona:
+            self.persona_entry.insert(0, self.persona)
 
         # 還原服務與模型
         self.provider = provider
@@ -634,17 +634,20 @@ class VoiceChatApp:
         self._append(
             f"[已載入對話「{session['name']}」，共 {shown} 則，可繼續聊]\n", "sys"
         )
+        if self.persona:
+            self._append(f"[已還原角色設定：{self.persona}]\n", "sys")
         if speaker_note:
             self._append(speaker_note, "sys")
 
     def write_session_file(self):
-        """將目前對話（含當下聲音、服務、模型）寫入磁檔。"""
+        """將目前對話（含當下聲音、服務、模型、角色）寫入磁檔。"""
         if self.current_session is None or self.current_path is None:
             return
         self.current_session["updated_at"] = now_iso()
         self.current_session["speaker_id"] = self.speaker_id
         self.current_session["provider"] = self.provider
         self.current_session["model"] = self.model_name
+        self.current_session["persona"] = self.persona
         payload = json.dumps(self.current_session, ensure_ascii=False, indent=2)
         try:
             with self.file_lock:
@@ -689,10 +692,14 @@ class VoiceChatApp:
             "speaker_id": self.speaker_id,
             "provider": self.provider,
             "model": self.model_name,
+            "persona": "",
             "history": [],
         }
         self.history = self.current_session["history"]
         self.current_path = path
+        # 新對話從預設夥伴開始，角色輸入框一併清空
+        self.persona = ""
+        self.persona_entry.delete(0, "end")
         self.write_session_file()
         self.refresh_session_list(select=display_name)
         self._clear_chat_display()
@@ -792,18 +799,17 @@ class VoiceChatApp:
     # ---------- 角色設定 ----------
 
     def apply_persona(self):
-        """套用角色設定：寫入 persona.txt 並立即生效於下一則訊息。"""
+        """套用角色設定：寫入目前對話檔並立即生效於下一則訊息。"""
+        if self.current_session is None:
+            self._append("[尚未建立對話，無法套用角色]\n", "sys")
+            return
         text = self.persona_entry.get().strip()
         self.persona = text
-        try:
-            PERSONA_PATH.write_text(text, encoding="utf-8")
-            saved = "（已存入 persona.txt）"
-        except Exception:
-            saved = "（persona.txt 寫入失敗，僅本次生效）"
+        self.write_session_file()
         if text:
-            self._append(f"[角色設定已套用：{text}]{saved}\n", "sys")
+            self._append(f"[角色設定已套用到「{self.current_session['name']}」：{text}]\n", "sys")
         else:
-            self._append(f"[已清除角色設定，回到預設]{saved}\n", "sys")
+            self._append(f"[已清除「{self.current_session['name']}」的角色設定，回到預設]\n", "sys")
 
     def build_system_prompt(self):
         """組出系統提示：格式規範在前，角色設定在後（避免破壞輸出格式）。"""
