@@ -1797,7 +1797,14 @@ def main():
 
     # 啟動視窗本身先以預估語言（最新聊天紀錄的語言）呈現
     set_ui_lang(arg_lang or latest_chat_lang())
-    chosen = arg_lang or ask_startup_language(root)
+
+    # 有對話紀錄時自動用上次語言，只有第一次啟動（無對話）才跳出選擇視窗
+    if arg_lang:
+        chosen = arg_lang
+    elif CHATS_DIR.exists() and any(CHATS_DIR.glob("*.json")):
+        chosen = latest_chat_lang()
+    else:
+        chosen = ask_startup_language(root)
 
     if chosen is None:
         # 使用者取消語言選擇：結束程式
