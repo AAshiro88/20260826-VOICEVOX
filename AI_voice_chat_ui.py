@@ -171,6 +171,10 @@ TR_TEXTS = {
         "填入 OPENROUTER_API_KEY 後重新啟動）\n",
         "msg_tts_failed": "（語音合成失敗：{}）\n",
         "role_user": "使用者",
+        "btn_retry": "重新生成",
+        "msg_retrying": "[重新生成中…]\n",
+        "msg_nothing_retry": "[沒有可重新生成的回覆]\n",
+        "msg_busy_retry": "[請先等待目前回覆完成]\n",
     },
     "ja": {
         "app_title": "VOICEVOX × Ollama／OpenRouter 音声チャット",
@@ -252,6 +256,10 @@ TR_TEXTS = {
         "OPENROUTER_API_KEY を記入して再起動してください）\n",
         "msg_tts_failed": "（音声合成に失敗：{}）\n",
         "role_user": "ユーザー",
+        "btn_retry": "再生成",
+        "msg_retrying": "[再生成中…]\n",
+        "msg_nothing_retry": "[再生成する訊息がありません]\n",
+        "msg_busy_retry": "[只今処理中の返信をお待ちください]\n",
     },
     "en": {
         "app_title": "VOICEVOX × Ollama／OpenRouter Voice Chat",
@@ -332,6 +340,10 @@ TR_TEXTS = {
         "next to this program and restart.)\n",
         "msg_tts_failed": "(Speech synthesis failed: {})\n",
         "role_user": "User",
+        "btn_retry": "Retry",
+        "msg_retrying": "[Regenerating…]\n",
+        "msg_nothing_retry": "[Nothing to retry]\n",
+        "msg_busy_retry": "[Wait for current reply]\n",
     },
 }
 
@@ -573,6 +585,36 @@ def post_json(path, base_url, params=None, payload=None, timeout=60, headers=Non
         return res.read()
 
 
+def detect_lang(text):
+    """用 Unicode 字元範圍判斷文字的主體語言，回傳 "ja"/"zh"/"en" 或 None。"""
+    ja = zh = en = 0
+    for ch in text:
+        cp = ord(ch)
+        if (0x3040 <= cp <= 0x309F    # ひらがな
+                or 0x30A0 <= cp <= 0x30FF   # カタカナ
+                or 0xFF65 <= cp <= 0xFF9F):  # 半角カナ
+            ja += 1
+        elif (0x4E00 <= cp <= 0x9FFF     # CJK 漢字
+                or 0xFF01 <= cp <= 0xFF5E):  # 全形字符（中文常用）
+            zh += 1
+        elif 0x0041 <= cp <= 0x007A:
+            en += 1
+    if ja == 0 and zh == 0 and en == 0:
+        return None
+    return max([(ja, "ja"), (zh, "zh"), (en, "en")], key=lambda x: x[0])[1]
+
+
+def ensure_lang_prefix(text, lang):
+    """若回覆缺少語言前綴，依指定語言自動補上。"""
+    if _LINE_PREFIX_RE.search(text):
+        return text
+    prefix_map = {"ja": "日", "zh": "中", "en": "英"}
+    tag = prefix_map.get(lang)
+    if not tag:
+        return text
+    return f"{tag}: {text.strip()}"
+
+
 _LINE_PREFIX_RE = re.compile(r"^(日|中|英)\s*[:：]\s*(.*)$")
 
 
@@ -615,7 +657,7 @@ def reply_parts(text, lang):
             or fallback
             or text
         )
-    voice = parts.get("jp") or conv
+    voice = parts.get("jp") or ("" if conv else "")
     return conv, voice
 
 
@@ -778,6 +820,7 @@ class VoiceChatApp:
         self.replay_seq = 0
         self.replay_texts = {}
         self.replay_hint_shown = False
+        self.displayed_asst_count = 0
 
         # 角色設定：屬於各對話工作階段，存取皆透過 current_session["persona"]
         self.persona = ""
@@ -890,6 +933,10 @@ class VoiceChatApp:
         style.configure(
             "Big.TButton", font=("Microsoft JhengHei", 12, "bold"), padding=(16, 12)
         )
+        self.retry_btn = ttk.Button(
+            bottom, text=tr("btn_retry"), command=self.retry_last
+        )
+        self.retry_btn.pack(side="right", padx=(0, 4), anchor="se")
         self.send_button = ttk.Button(
             bottom, text=tr("btn_send"), command=self.send_message, style="Big.TButton"
         )
@@ -937,6 +984,7 @@ class VoiceChatApp:
         self.chat.insert("end", "\n")
         self.chat.see("end")
         self.chat.configure(state="disabled")
+        self.displayed_asst_count += 1
 
         if not self.replay_hint_shown:
             self.replay_hint_shown = True
@@ -983,14 +1031,21 @@ class VoiceChatApp:
                         self.session_box.set(msg[3])
                 elif kind == "restore":
                     self.handle_restore(msg[1], msg[2])
+                    self.retry_btn.configure(
+                        state="disabled" if self.displayed_asst_count == 0 else "normal"
+                    )
                 elif kind == "busy":
                     self.busy = msg[1]
                     state = "disabled" if self.busy else "normal"
                     self.send_button.configure(state=state)
-                    for btn in (self.new_btn, self.load_btn, self.rename_btn, self.delete_btn):
+                    for btn in (self.new_btn, self.load_btn, self.rename_btn, self.delete_btn, self.retry_btn):
                         btn.configure(state=state)
         except queue.Empty:
             pass
+        # retry 按鈕：忙碌中或無 AI 回覆時 disable
+        self.retry_btn.configure(
+            state="disabled" if self.busy or self.displayed_asst_count == 0 else "normal"
+        )
         self.root.after(100, self._poll_queue)
 
     def _emit(self, *msg):
@@ -1223,6 +1278,20 @@ class VoiceChatApp:
                 self._register_ai_message(conv, voice)
                 shown += 1
 
+        # 載入時修復壞掉的語言標籤並寫回檔案（一次性修復）
+        fixed_any = False
+        for m in history:
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                original = m["content"]
+                m["content"] = ensure_lang_prefix(original, session["lang"])
+                if m["content"] != original:
+                    fixed_any = True
+        if fixed_any:
+            try:
+                self.write_session_file()
+            except Exception:
+                pass
+
         self._append(tr("msg_loaded").format(session["name"], shown), "sys")
         if self.persona:
             self._append(tr("msg_persona_restored").format(self.persona), "sys")
@@ -1448,6 +1517,45 @@ class VoiceChatApp:
         if not quiet:
             self._append(tr("msg_stopped"), "sys")
 
+    def retry_last(self):
+        """移除最後一則 AI 回覆，用最後一則 user 訊息重新生成。"""
+        if self.busy:
+            self._append(tr("msg_busy_retry"), "sys")
+            return
+        # 找最後一個 user 訊息（用來重送）
+        last_user = None
+        for m in reversed(self.history):
+            if m.get("role") == "user":
+                last_user = m.get("content", "")
+                break
+        if last_user is None:
+            self._append(tr("msg_nothing_retry"), "sys")
+            return
+        # 移除最後一個 assistant 回覆
+        for i in range(len(self.history) - 1, -1, -1):
+            if self.history[i].get("role") == "assistant":
+                self.history.pop(i)
+                break
+        else:
+            self._append(tr("msg_nothing_retry"), "sys")
+            return
+        # 重繪顯示（清除後重畫整個歷史）
+        self._clear_chat_display()
+        self.displayed_asst_count = 0
+        self.replay_texts.clear()
+        self.replay_seq = 0
+        self.replay_hint_shown = False
+        for m in self.history:
+            if m.get("role") == "user":
+                self._append(f"{tr('you_prefix')}{m['content']}\n", "user")
+            elif m.get("role") == "assistant":
+                conv, voice = reply_parts(m["content"], self.convo_lang)
+                self._register_ai_message(conv, voice)
+        self._append(tr("msg_retrying"), "sys")
+        self._emit("busy", True)
+        self.stop_requested = False
+        threading.Thread(target=self.chat_worker, args=(last_user,), daemon=True).start()
+
     def replay_message(self, tag):
         """重新合成播放指定則 AI 回覆的朗讀內容。"""
         voice = self.replay_texts.get(tag)
@@ -1580,6 +1688,7 @@ class VoiceChatApp:
             self._emit("busy", False)
             return
 
+        reply = ensure_lang_prefix(reply, self.convo_lang)
         self.history.append({"role": "assistant", "content": reply})
         self.write_session_file()
 
