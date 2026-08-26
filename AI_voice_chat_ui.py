@@ -782,6 +782,13 @@ class VoiceChatApp:
 
     # ---------- 事件 ----------
 
+    def _on_return(self, event):
+        """Enter 送出訊息；按住 Shift 時允許換行。"""
+        if event.state & 0x0001:
+            return None
+        self.send_message()
+        return "break"
+
     def send_message(self):
         user_text = self.input_box.get("1.0", "end-1c").strip()
         if not user_text or self.busy:
