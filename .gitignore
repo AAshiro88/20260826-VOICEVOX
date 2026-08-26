@@ -1,5 +1,7 @@
 .env
 __pycache__/
+*.pyc
+test_output.wav
 db/
 .vscode/
 VOICEVOX/

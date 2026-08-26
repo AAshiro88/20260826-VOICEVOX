@@ -5,10 +5,11 @@
 - 啟動時自動偵測 VOICEVOX 引擎與 Ollama 狀態
 - 下拉選單只列出偏好的 3 個聲音：猫使ビィ、小夜/SAYO、もち子さん
 - 對話內容顯示於畫面，AI 回覆逐句合成播放，可中途停止朗讀
+- 可切換對話來源：本機 Ollama 或 OpenRouter 雲端 API（金鑰放在同目錄 .env）
 - VOICEVOX 只能正確朗讀日文，因此要求模型以「日:/中:」兩行格式回覆
 
 僅使用 Python 標準庫，不需安裝第三方套件。
-用法：python ollama_voice_chat_ui.py [引擎URL]
+用法：python AI_voice_chat_ui.py
 """
 
 import atexit
@@ -27,6 +28,27 @@ import winsound
 
 ENGINE_URL = "http://127.0.0.1:50021"
 OLLAMA_URL = "http://127.0.0.1:11434"
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+
+# 從與本檔案同目錄的 .env 讀取設定
+ENV_PATH = Path(__file__).with_name(".env")
+
+
+def load_env(path):
+    """讀取 .env 檔（KEY=VALUE 格式），回傳 dict。"""
+    env = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip().strip('"').strip("'")
+    return env
+
+
+# OpenRouter API 金鑰；請自行在 .env 填入，勿提交到版本控制
+OPENROUTER_API_KEY = load_env(ENV_PATH).get("OPENROUTER_API_KEY", "")
 
 # 聲音偏好順序：比對關鍵字（不分大小寫、部分符合）
 PREFERRED_SPEAKERS = [
@@ -37,6 +59,9 @@ PREFERRED_SPEAKERS = [
 
 # 模型偏好順序
 PREFERRED_MODELS = ["qwen3.6", "qwen3.5", "gemma4"]
+
+# OpenRouter 模型偏好關鍵字（用於預設選擇）
+PREFERRED_OPENROUTER_MODELS = ["gemini", "gpt", "claude"]
 
 SYSTEM_PROMPT = (
     "你是透過 VOICEVOX 語音合成與使用者對話的夥伴。VOICEVOX 只能朗讀日文，"
@@ -56,16 +81,19 @@ def http_json(path, base_url, params=None, timeout=15):
         return json.loads(res.read().decode("utf-8"))
 
 
-def post_json(path, base_url, params=None, payload=None, timeout=60):
+def post_json(path, base_url, params=None, payload=None, timeout=60, headers=None):
     """發送 POST（JSON 內容，payload 為 None 時送空內容）並回傳原始回應。"""
     url = base_url + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
     data = json.dumps(payload).encode("utf-8") if payload is not None else b""
+    all_headers = {"Content-Type": "application/json"}
+    if headers:
+        all_headers.update(headers)
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=all_headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as res:
@@ -106,6 +134,9 @@ class VoiceChatApp:
         self.history = []
         self.speaker_id = None
         self.model_name = ""
+        self.provider = "ollama"
+        self.ollama_models = []
+        self.openrouter_models = []
         self.busy = False
         self.stop_requested = False
 
@@ -127,18 +158,33 @@ class VoiceChatApp:
 
         ttk.Label(top, text="Ollama：").pack(side="left")
         self.ollama_status = ttk.Label(top, text="檢查中…", foreground="#b26a00")
-        self.ollama_status.pack(side="left")
+        self.ollama_status.pack(side="left", padx=(0, 16))
+
+        ttk.Label(top, text="OpenRouter：").pack(side="left")
+        key_hint = "金鑰已載入" if OPENROUTER_API_KEY else "未設定金鑰（.env）"
+        self.or_status = ttk.Label(
+            top, text=("檢查中…" if OPENROUTER_API_KEY else key_hint), foreground="#b26a00"
+        )
+        self.or_status.pack(side="left")
 
         mid = ttk.Frame(self.root, padding=(6, 0))
         mid.pack(fill="x")
 
+        ttk.Label(mid, text="服務").pack(side="left")
+        self.provider_box = ttk.Combobox(
+            mid, state="readonly", width=15, values=["Ollama（本機）", "OpenRouter"]
+        )
+        self.provider_box.current(0)
+        self.provider_box.pack(side="left", padx=(4, 16))
+        self.provider_box.bind("<<ComboboxSelected>>", self.on_provider_selected)
+
         ttk.Label(mid, text="聲音").pack(side="left")
-        self.voice_box = ttk.Combobox(mid, state="readonly", width=38)
+        self.voice_box = ttk.Combobox(mid, state="readonly", width=34)
         self.voice_box.pack(side="left", padx=(4, 16))
         self.voice_box.bind("<<ComboboxSelected>>", self.on_voice_selected)
 
         ttk.Label(mid, text="模型").pack(side="left")
-        self.model_box = ttk.Combobox(mid, state="readonly", width=28)
+        self.model_box = ttk.Combobox(mid, width=24)
         self.model_box.pack(side="left", padx=(4, 0))
         self.model_box.bind("<<ComboboxSelected>>", self.on_model_selected)
 
@@ -204,8 +250,18 @@ class VoiceChatApp:
                     self.ollama_status.configure(text=msg[1], foreground="#c62828")
                 elif kind == "voices":
                     self._load_voices(msg[1])
-                elif kind == "models":
-                    self._load_models(msg[1])
+                elif kind == "ollama_models":
+                    self.ollama_models = msg[1]
+                    if self.provider == "ollama":
+                        self._apply_models()
+                elif kind == "or_models":
+                    self.openrouter_models = msg[1]
+                    if self.provider == "openrouter":
+                        self._apply_models()
+                elif kind == "or_ok":
+                    self.or_status.configure(text=msg[1], foreground="#1a7f37")
+                elif kind == "or_ng":
+                    self.or_status.configure(text=msg[1], foreground="#c62828")
                 elif kind == "busy":
                     self.busy = msg[1]
                     self.send_button.configure(state="disabled" if self.busy else "normal")
@@ -251,7 +307,7 @@ class VoiceChatApp:
                 m["name"] for m in tags.get("models", []) if "embed" not in m["name"].lower()
             ]
             self._emit("ollama_ok", "已連線")
-            self._emit("models", models)
+            self._emit("ollama_models", models)
         except Exception:
             self._emit("ollama_ng", "未連線")
             self._emit(
@@ -259,6 +315,17 @@ class VoiceChatApp:
                 "無法連線 Ollama。請執行 ollama serve 或啟動 Ollama 應用程式。\n\n",
                 "sys",
             )
+
+        # 載入 OpenRouter 模型清單（公開端點，不需金鑰）
+        if not OPENROUTER_API_KEY:
+            self._emit("or_ng", "未設定金鑰")
+        try:
+            data = http_json("/models", OPENROUTER_URL, timeout=20)
+            ids = sorted(m["id"] for m in data.get("data", []))
+            self._emit("or_ok", "可用" + ("（金鑰已載入）" if OPENROUTER_API_KEY else "（未設金鑰）"))
+            self._emit("or_models", ids)
+        except Exception:
+            self._emit("or_ng", "清單取得失敗")
 
     def _collect_voices(self, speakers):
         """組出聲音選項，只保留符合偏好關鍵字的 3 個聲音。"""
@@ -283,20 +350,29 @@ class VoiceChatApp:
             self.voice_box.current(0)
             self.on_voice_selected()
 
-    def _load_models(self, models):
-        self.model_list = models
-        self.model_box.configure(values=models)
-        default = next(
-            (
-                i
-                for i, m in enumerate(models)
-                if any(key in m for key in PREFERRED_MODELS)
-            ),
-            0 if models else -1,
+    def _apply_models(self):
+        """依目前服務來源填入模型下拉選單並選擇預設模型。"""
+        models = self.ollama_models if self.provider == "ollama" else self.openrouter_models
+        # OpenRouter 允許自行輸入模型 ID；Ollama 限定清單內項目
+        self.model_box.configure(
+            values=models, state="normal" if self.provider == "openrouter" else "readonly"
         )
-        if models:
-            self.model_box.current(default)
-            self.on_model_selected()
+        if not models:
+            self.model_box.set("")
+            return
+        keys = PREFERRED_MODELS if self.provider == "ollama" else PREFERRED_OPENROUTER_MODELS
+        default_index = next(
+            (i for i, m in enumerate(models) if any(key in m for key in keys)),
+            0,
+        )
+        self.model_box.current(default_index)
+        self.on_model_selected()
+
+    def on_provider_selected(self, event=None):
+        provider = self.provider_box.get()
+        self.provider = "openrouter" if "OpenRouter" in provider else "ollama"
+        self._append(f"[已切換服務：{provider}]\n", "sys")
+        self._apply_models()
 
     def on_voice_selected(self, event=None):
         label = self.voice_box.get()
@@ -339,19 +415,49 @@ class VoiceChatApp:
     # ---------- 背景：對話與合成 ----------
 
     def chat_worker(self, user_text):
+        if self.provider == "openrouter" and not OPENROUTER_API_KEY:
+            self._emit(
+                "text",
+                "（尚未設定 OpenRouter 金鑰，請在本程式同目錄的 .env 填入 OPENROUTER_API_KEY 後重新啟動）\n",
+                "sys",
+            )
+            self._emit("busy", False)
+            return
+
         self.history.append({"role": "user", "content": user_text})
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.history
+
         try:
-            resp = post_json(
-                "/api/chat",
-                OLLAMA_URL,
-                payload={"model": self.model_name, "messages": messages, "stream": False},
-                timeout=300,
-            )
-            reply = json.loads(resp.decode("utf-8"))["message"]["content"]
+            if self.provider == "ollama":
+                resp = post_json(
+                    "/api/chat",
+                    OLLAMA_URL,
+                    payload={
+                        "model": self.model_name,
+                        "messages": messages,
+                        "stream": False,
+                    },
+                    timeout=300,
+                )
+                reply = json.loads(resp.decode("utf-8"))["message"]["content"]
+            else:
+                # OpenRouter 採用 OpenAI 相容格式
+                resp = post_json(
+                    "/chat/completions",
+                    OPENROUTER_URL,
+                    payload={"model": self.model_name, "messages": messages},
+                    headers={
+                        # 金鑰只存在記憶體中傳遞，不寫入任何輸出
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "HTTP-Referer": "http://localhost",
+                        "X-Title": "VOICEVOX-Ollama-Chat",
+                    },
+                    timeout=300,
+                )
+                reply = json.loads(resp.decode("utf-8"))["choices"][0]["message"]["content"]
         except Exception as e:
             self.history.pop()
-            self._emit("text", f"（呼叫 Ollama 失敗：{e}）\n", "sys")
+            self._emit("text", f"（呼叫對話服務失敗：{e}）\n", "sys")
             self._emit("busy", False)
             return
 
