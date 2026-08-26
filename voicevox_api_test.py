@@ -45,10 +45,10 @@ def request_json(path, params=None):
         return json.loads(res.read().decode("utf-8"))
 
 
-def post_json(path, params, payload):
-    """發送 POST 請求（JSON 內容）並回傳回應內容。"""
+def post_json(path, params, payload=None):
+    """發送 POST 請求（JSON 內容，payload 為 None 時送空內容）並回傳回應內容。"""
     url = BASE_URL + path + "?" + urllib.parse.urlencode(params)
-    data = json.dumps(payload).encode("utf-8")
+    data = json.dumps(payload).encode("utf-8") if payload is not None else b""
     req = urllib.request.Request(
         url,
         data=data,
@@ -158,12 +158,14 @@ def main():
             return
         speaker_id = int(raw)
 
-    # 測項 3：產生 audio_query
+    # 測項 3：產生 audio_query（POST，參數在網址、內容為空）
     query = None
     try:
-        query = request_json(
-            "/audio_query",
-            {"text": TEST_TEXT, "speaker": speaker_id},
+        query = json.loads(
+            post_json(
+                "/audio_query",
+                {"text": TEST_TEXT, "speaker": speaker_id},
+            ).decode("utf-8")
         )
         accent_phrases = len(query.get("accent_phrases", []))
         record("POST /audio_query", True, f"取得 {accent_phrases} 個句子韻律區塊")

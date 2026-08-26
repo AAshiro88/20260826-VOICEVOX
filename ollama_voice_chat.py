@@ -60,12 +60,12 @@ def http_json(path, base_url, params=None):
         return json.loads(res.read().decode("utf-8"))
 
 
-def post_json(path, base_url, params, payload, timeout=60):
-    """發送 POST（JSON 內容）並回傳原始回應。"""
+def post_json(path, base_url, params, payload=None, timeout=60):
+    """發送 POST（JSON 內容，payload 為 None 時送空內容）並回傳原始回應。"""
     url = base_url + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    data = json.dumps(payload).encode("utf-8")
+    data = json.dumps(payload).encode("utf-8") if payload is not None else b""
     req = urllib.request.Request(
         url,
         data=data,
@@ -168,10 +168,14 @@ def speak(text, speaker_id):
     global _wav_seq
     for sentence in split_sentences(text):
         try:
-            query = http_json(
-                "/audio_query",
-                ENGINE_URL,
-                {"text": sentence, "speaker": speaker_id},
+            # /audio_query 為 POST，參數在網址、內容為空
+            query = json.loads(
+                post_json(
+                    "/audio_query",
+                    ENGINE_URL,
+                    {"text": sentence, "speaker": speaker_id},
+                    None,
+                ).decode("utf-8")
             )
             wav_data = post_json(
                 "/synthesis",
