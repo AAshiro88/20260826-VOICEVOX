@@ -24,6 +24,7 @@ import json
 import queue
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import urllib.parse
@@ -38,10 +39,22 @@ ENGINE_URL = "http://127.0.0.1:50021"
 OLLAMA_URL = "http://127.0.0.1:11434"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
-# 從與本檔案同目錄的 .env 讀取設定（金鑰等敏感資訊，不上 GIT）
-ENV_PATH = Path(__file__).with_name(".env")
+def get_base_dir():
+    """取得程式基底目錄。
+
+    一般執行回傳本檔案所在目錄；以 PyInstaller 打包後（frozen）回傳
+    exe 所在目錄，讓 .env 與 chats/ 維持在 exe 旁邊，
+    不會被封裝進執行檔、也不會寫到暫存解壓目錄。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
+
+
+# 從基底目錄的 .env 讀取設定（金鑰等敏感資訊；不上 GIT、不打包進執行檔）
+ENV_PATH = get_base_dir() / ".env"
 # 對話紀錄（一般資料，可上 GIT）；角色設定存於各對話檔內，無獨立設定檔
-CHATS_DIR = Path(__file__).with_name("chats")
+CHATS_DIR = get_base_dir() / "chats"
 
 
 def load_env(path):

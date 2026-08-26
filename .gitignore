@@ -8,3 +8,6 @@ VOICEVOX/
 voicevox_engine-master/
 voicevox_engine-master.zip
 voicevox-windows-directml-0.25.2.zip
+build/
+dist/
+*.spec

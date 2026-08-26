@@ -97,6 +97,15 @@ python voicevox_api_test.py
 python ollama_voice_chat.py
 ```
 
+### 懶人啟動與打包成 exe
+
+| 檔案 | 用途 |
+|------|------|
+| `start_ai_voice_chat.bat` | 雙擊直接啟動主程式（自動找 Anaconda Python） |
+| `build_exe.bat` | 以 PyInstaller 打包成單一執行檔 `dist\AI_VoiceChat_UI.exe` |
+
+打包注意：**`.env` 與 `chats/` 不會被封裝進 exe**。程式在打包模式（frozen）下會改以 exe 所在資料夾作為基底目錄，因此使用 exe 前請手動把 `.env` 複製到 `dist\` 旁；`chats\` 會在首次存檔時自動建立在 exe 旁。
+
 ## 對話檔案格式
 
 `chats/chat_YYYYMMDD_HHMMSS_mmm.json`（檔名不含文字，同名對話互不衝突）：
