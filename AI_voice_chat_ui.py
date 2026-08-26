@@ -9,7 +9,8 @@
   * 日本語：回覆為純日文，送模型、顯示與朗讀都用同一份原文，不需翻譯
   * 中文／English：回覆含「日:」行供 VOICEVOX 合成，送模型只送該語言行（省 token）
   * 朗讀一律使用日文行（VOICEVOX 只有日文發音正確）
-- 介面文字多語言：.env 設 UI_LANG=zh|ja|en，變更後重啟生效
+- 語言於啟動時選擇（預設帶入最新聊天紀錄的語言），每個對話綁定各自語言，
+  對話清單只顯示目前語言的對話；主畫面「語言」下拉切換後自動重啟套用
 - 多重對話管理：每個對話存成 chats/ 下獨立 JSON（含當時聲音、服務、模型與語言），
   可開新對話、載入、改名、刪除；第一則回覆後會由 AI 自動取標題（可再手動改名）
   檔名一律為 chat_日期_時間_毫秒.json（不含文字）；顯示名稱存在檔案內容中，
@@ -78,10 +79,17 @@ def load_env(path):
 # OpenRouter API 金鑰；請自行在 .env 填入，勿提交到版本控制
 OPENROUTER_API_KEY = load_env(ENV_PATH).get("OPENROUTER_API_KEY", "")
 
-# 介面語言：從 .env 讀取 UI_LANG（zh=繁體中文、ja=日本語、en=English），變更後重啟生效
-UI_LANG = load_env(ENV_PATH).get("UI_LANG", "zh").strip().lower()
-if UI_LANG not in ("zh", "ja", "en"):
-    UI_LANG = "zh"
+# 目前介面／對話語言（zh=繁體中文、ja=日本語、en=English）。
+# 不存於 .env：每次啟動由語言選擇視窗指定（預設帶入最新聊天紀錄的語言），
+# 或由切換語言時的重啟參數 --lang 直接帶入。
+UI_LANG = "zh"
+
+
+def set_ui_lang(code):
+    """設定目前的介面與對話語言（僅接受支援的三種代碼）。"""
+    global UI_LANG
+    if code in ("zh", "ja", "en"):
+        UI_LANG = code
 
 # 介面固定文字（三語）；tr() 依 UI_LANG 取值，缺漏時退回繁體中文
 TR_TEXTS = {
@@ -112,14 +120,16 @@ TR_TEXTS = {
         "btn_delete": "刪除",
         "btn_stop": "停止朗讀",
         "btn_send": "送出",
+        "btn_ok": "確定",
+        "btn_cancel": "取消",
         "provider_local": "Ollama（本機）",
         "msg_engine_down": "無法連線 VOICEVOX 引擎。請先啟動 VOICEVOX.exe 後重新開啟本程式。\n\n",
         "msg_no_voices": "找不到偏好的 3 個聲音（猫使ビィ、小夜/SAYO、もち子さん）。\n"
         "請確認 VOICEVOX 已安裝這些角色語音。\n\n",
         "msg_switched_provider": "[已切換服務：{}]\n",
         "msg_selected_voice": "[已選擇聲音 {}]\n",
-        "msg_switched_lang": "[語言已切換：{}（對話自下一則回覆起生效；介面不同時自動重啟）]\n",
-        "msg_ui_restart": "[介面語言變更，程式即將自動重新啟動…]\n",
+        "msg_switched_lang": "[語言已切換：{}（重新啟動後套用介面與對話清單）]\n",
+        "msg_ui_restart": "[語言切換中，程式即將自動重新啟動…]\n",
         "msg_no_session_persona": "[尚未建立對話，無法套用角色]\n",
         "msg_persona_applied": "[角色設定已套用到「{}」：{}]\n",
         "msg_persona_cleared": "[已清除「{}」的角色設定，回到預設]\n",
@@ -150,12 +160,13 @@ TR_TEXTS = {
         "dlg_delete_body": "確定要刪除「{}」嗎？\n此動作無法復原。",
         "dlg_rename_title": "重新命名對話",
         "dlg_rename_prompt": "新的對話名稱：",
+        "dlg_lang_title": "選擇語言",
+        "dlg_lang_prompt": "請選擇介面與對話語言：",
         "msg_summarizing": "[對話過長，整理歷史中，請稍候…（此時無法送出訊息）]\n",
         "msg_summary_failed": "[摘要失敗，改用完整歷史繼續（{}）]\n",
         "msg_summary_empty": "[摘要為空，改用完整歷史繼續]\n",
         "msg_summary_done": "[整理完成，舊歷史已壓縮為摘要]\n",
         "msg_llm_failed": "（呼叫對話服務失敗：{}）\n",
-        "msg_ui_save_failed": "（無法寫入 .env，介面語言未變更：{}）\n",
         "msg_no_key": "（尚未設定 OpenRouter 金鑰，請在本程式同目錄的 .env "
         "填入 OPENROUTER_API_KEY 後重新啟動）\n",
         "msg_tts_failed": "（語音合成失敗：{}）\n",
@@ -188,6 +199,8 @@ TR_TEXTS = {
         "btn_delete": "削除",
         "btn_stop": "読み上げ停止",
         "btn_send": "送信",
+        "btn_ok": "決定",
+        "btn_cancel": "キャンセル",
         "provider_local": "Ollama（ローカル）",
         "msg_engine_down": "VOICEVOX エンジンに接続できません。"
         "VOICEVOX.exe を起動してから、本プログラムを開き直してください。\n\n",
@@ -195,8 +208,8 @@ TR_TEXTS = {
         "VOICEVOX にこれらのボイスが入っているか確認してください。\n\n",
         "msg_switched_provider": "[サービスを切り替えました：{}]\n",
         "msg_selected_voice": "[声を選択しました：{}]\n",
-        "msg_switched_lang": "[言語を切り替えました：{}（会話は次の返信から、表示言語が異なる場合は再起動して適用）]\n",
-        "msg_ui_restart": "[表示言語の変更のため、プログラムを再起動します…]\n",
+        "msg_switched_lang": "[言語を切り替えました：{}（再起動後に表示と一覧に適用）]\n",
+        "msg_ui_restart": "[言語を切り替えるため、プログラムを再起動します…]\n",
         "msg_no_session_persona": "[会話が未作成のため、人格を適用できません]\n",
         "msg_persona_applied": "[「{}」に人格設定を適用しました：{}]\n",
         "msg_persona_cleared": "[「{}」の人格設定を消去し、デフォルトに戻しました]\n",
@@ -227,13 +240,14 @@ TR_TEXTS = {
         "dlg_delete_body": "「{}」を削除しますか？\nこの操作は取り消せません。",
         "dlg_rename_title": "会話の改名",
         "dlg_rename_prompt": "新しい会話名：",
+        "dlg_lang_title": "言語を選択",
+        "dlg_lang_prompt": "インターフェースと会話の言語を選択してください：",
         "msg_summarizing": "[会話が長いため履歴を整理中です。お待ちください…"
         "（この間は送信できません）]\n",
         "msg_summary_failed": "[要約に失敗したため、完全な履歴で続行します（{}）]\n",
         "msg_summary_empty": "[要約が空のため、完全な履歴で続行します]\n",
         "msg_summary_done": "[整理完了：古い履歴を要約に圧縮しました]\n",
         "msg_llm_failed": "（対話サービスの呼び出しに失敗：{}）\n",
-        "msg_ui_save_failed": "（.env に書き込めず、表示言語を変更できませんでした：{}）\n",
         "msg_no_key": "（OpenRouter キーが未設定です。同じフォルダーの .env に "
         "OPENROUTER_API_KEY を記入して再起動してください）\n",
         "msg_tts_failed": "（音声合成に失敗：{}）\n",
@@ -266,6 +280,8 @@ TR_TEXTS = {
         "btn_delete": "Delete",
         "btn_stop": "Stop speech",
         "btn_send": "Send",
+        "btn_ok": "OK",
+        "btn_cancel": "Cancel",
         "provider_local": "Ollama (local)",
         "msg_engine_down": "Cannot connect to the VOICEVOX engine. "
         "Start VOICEVOX.exe and reopen this program.\n\n",
@@ -273,8 +289,8 @@ TR_TEXTS = {
         "Make sure your VOICEVOX install includes these characters.\n\n",
         "msg_switched_provider": "[Switched service: {}]\n",
         "msg_selected_voice": "[Selected voice: {}]\n",
-        "msg_switched_lang": "[Language switched: {} (conversation applies from next reply; UI restarts if different)]\n",
-        "msg_ui_restart": "[UI language changed; restarting…]\n",
+        "msg_switched_lang": "[Language switched: {}; restarting to apply to UI and chat list]\n",
+        "msg_ui_restart": "[Switching language; restarting…]\n",
         "msg_no_session_persona": "[No active chat; cannot apply persona]\n",
         "msg_persona_applied": "[Persona applied to \"{}\": {}]\n",
         "msg_persona_cleared": "[Cleared persona for \"{}\"; back to default]\n",
@@ -305,12 +321,13 @@ TR_TEXTS = {
         "dlg_delete_body": "Delete \"{}\"?\nThis action cannot be undone.",
         "dlg_rename_title": "Rename Chat",
         "dlg_rename_prompt": "New chat name:",
+        "dlg_lang_title": "Select Language",
+        "dlg_lang_prompt": "Choose the UI & chat language:",
         "msg_summarizing": "[History too long; summarizing, please wait… (sending is disabled)]\n",
         "msg_summary_failed": "[Summarization failed; continuing with full history ({})]\n",
         "msg_summary_empty": "[Empty summary; continuing with full history]\n",
         "msg_summary_done": "[Done: older history compressed into a summary]\n",
         "msg_llm_failed": "(Chat request failed: {})\n",
-        "msg_ui_save_failed": "(Could not write .env; UI language unchanged: {})\n",
         "msg_no_key": "(OpenRouter key not set. Put OPENROUTER_API_KEY into the .env "
         "next to this program and restart.)\n",
         "msg_tts_failed": "(Speech synthesis failed: {})\n",
@@ -324,27 +341,10 @@ def tr(key):
     return TR_TEXTS.get(UI_LANG, {}).get(key) or TR_TEXTS["zh"].get(key) or key
 
 
-def save_ui_lang(lang):
-    """將 UI_LANG 寫入 .env（僅替換或附加該行，保留其餘設定內容）。"""
-    lines = []
-    if ENV_PATH.exists():
-        lines = ENV_PATH.read_text(encoding="utf-8-sig").splitlines()
-    new_lines = []
-    replaced = False
-    for line in lines:
-        if line.strip().replace(" ", "").startswith("UI_LANG="):
-            new_lines.append(f"UI_LANG={lang}")
-            replaced = True
-        else:
-            new_lines.append(line)
-    if not replaced:
-        new_lines.append(f"UI_LANG={lang}")
-    ENV_PATH.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-
-
-def restart_app():
+def restart_app(lang=None):
     """以相同直譯器（或打包後的同一個 exe）重新啟動程式。
 
+    帶入 lang 時附加 --lang 參數，重新啟動後跳過語言選擇視窗直接套用。
     以 DETACHED_PROCESS 啟動，避免子程序依附原主控台，
     舊視窗關閉後新程式仍能存活。
     """
@@ -352,8 +352,92 @@ def restart_app():
         args = [sys.executable]
     else:
         args = [sys.executable, str(Path(__file__).resolve())]
+    if lang:
+        args.append(f"--lang={lang}")
     flags = getattr(subprocess, "DETACHED_PROCESS", 0)
     subprocess.Popen(args, close_fds=True, creationflags=flags)
+
+
+def latest_chat_lang():
+    """回傳最新一筆聊天紀錄的語言，作為啟動選擇視窗的預設值。
+
+    依檔案修改時間取最新的 JSON；無聊天紀錄、內容讀取失敗或語言欄位
+    異常時，回傳預設 zh（向前檢查最近 5 筆，略過損壞檔案）。
+    """
+    try:
+        files = sorted(
+            CHATS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+    except Exception:
+        return DEFAULT_CONVO_LANG
+    for p in files[:5]:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            lang = data.get("lang")
+            if lang in CONVO_LANG_NAMES:
+                return lang
+        except Exception:
+            continue
+    return DEFAULT_CONVO_LANG
+
+
+def ask_startup_language(root):
+    """啟動時彈出語言選擇視窗，回傳選擇的語言代碼；取消時回傳 None。
+
+    預設選取值為最新聊天紀錄的語言。
+    """
+    dlg = tk.Toplevel(root)
+    dlg.withdraw()  # 先隱藏，定位完成再顯示，避免出現在錯誤位置
+    dlg.title(tr("dlg_lang_title"))
+    # 注意：主視窗此時仍為隱藏狀態，不可設定 transient——
+    # 暫態視窗綁定隱藏父視窗時，Windows 上會整個不出現
+    dlg.resizable(False, False)
+
+    frm = ttk.Frame(dlg, padding=14)
+    frm.pack(fill="both", expand=True)
+    ttk.Label(frm, text=tr("dlg_lang_prompt")).pack(anchor="w")
+    box = ttk.Combobox(
+        frm, state="readonly", width=12,
+        values=[name for _, name in CONVO_LANGS],
+    )
+    box.set(CONVO_LANG_NAMES[latest_chat_lang()])
+    box.pack(pady=(8, 12))
+
+    result = {"lang": None}
+
+    def confirm():
+        result["lang"] = next(
+            (c for c, n in CONVO_LANGS if n == box.get()), None
+        )
+        dlg.destroy()
+
+    btns = ttk.Frame(frm)
+    btns.pack(fill="x")
+    ttk.Button(btns, text=tr("btn_cancel"), command=dlg.destroy).pack(side="right")
+    ttk.Button(btns, text=tr("btn_ok"), command=confirm).pack(side="right", padx=(0, 8))
+
+    # 以需求尺寸置中於螢幕，再顯示並設為最上層，避免被其他視窗遮住
+    dlg.update_idletasks()
+    x = (dlg.winfo_screenwidth() - dlg.winfo_reqwidth()) // 2
+    y = (dlg.winfo_screenheight() - dlg.winfo_reqheight()) // 2
+    dlg.geometry(f"+{x}+{y}")
+    dlg.deiconify()
+    dlg.attributes("-topmost", True)
+    dlg.lift()
+    dlg.focus_force()
+    try:
+        # 視窗確實顯示後才設定獨占焦點；部分環境會在此拋 TclError，
+        # 僅代表無法鎖定焦點，不應因此中斷整個程式啟動
+        dlg.wait_visibility()
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+    try:
+        dlg.wait_window()
+    except tk.TclError:
+        # 視窗在進入等待前就被關閉或銷毀（快速關閉、系統回收等），視同取消
+        pass
+    return result["lang"]
 
 
 # 聲音偏好順序：比對關鍵字（不分大小寫、部分符合）
@@ -615,9 +699,10 @@ def new_chat_filename():
     return path
 
 
-def scan_chat_files():
+def scan_chat_files(lang=None):
     """掃描 chats/ 目錄，回傳按更新時間排序的（顯示名稱, 路徑）清單。
 
+    指定 lang 時只列出該語言的對話（舊檔無 lang 欄位視為 zh）；
     顯示名稱取自檔案內容的 name 欄位；讀取失敗或舊格式檔案改用檔名。
     允許多個對話同名，顯示時自動以（2）（3）區分。
     """
@@ -632,14 +717,22 @@ def scan_chat_files():
     seen = {}
     for p in files:
         name = None
+        file_lang = None
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 n = data.get("name")
                 if isinstance(n, str) and n.strip():
                     name = n.strip()
+                file_lang = data.get("lang")
         except Exception:
             name = None
+        # 語言過濾：無 lang 欄位的舊檔視為 zh
+        if lang is not None:
+            if file_lang not in CONVO_LANG_NAMES:
+                file_lang = DEFAULT_CONVO_LANG
+            if file_lang != lang:
+                continue
         if not name:
             name = p.stem
         if name in seen:
@@ -667,8 +760,9 @@ class VoiceChatApp:
         self.speaker_id = None
         self.model_name = ""
         self.provider = "ollama"
-        # 對話語言（ja＝純日文；zh／en＝對話語言＋日文朗讀行的兩行格式）
-        self.convo_lang = DEFAULT_CONVO_LANG
+        # 對話語言（ja＝純日文；zh／en＝對話語言＋日文朗讀行的兩行格式），
+        # 由啟動時的語言選擇（或重啟帶入的 --lang）決定
+        self.convo_lang = UI_LANG
         self.ollama_models = []
         self.openrouter_models = []
         self.busy = False
@@ -957,8 +1051,8 @@ class VoiceChatApp:
             self._emit("or_ng", tr("list_failed"))
             self._emit("or_models", [])
 
-        # 掃描既有對話，準備還原最近使用的
-        pairs = scan_chat_files()
+        # 掃描目前語言的既有對話，準備還原最近使用的
+        pairs = scan_chat_files(self.convo_lang)
         names = [d for d, _ in pairs]
         paths = {d: str(p) for d, p in pairs}
         latest = None
@@ -1029,28 +1123,21 @@ class VoiceChatApp:
                 self._append(tr("msg_selected_voice").format(label), "sys")
 
     def on_lang_selected(self, event=None):
-        """切換語言：同時套用對話語言與介面語言。
+        """切換語言：綁定目前對話的新語言並存檔後，自動重新啟動套用。
 
-        - 對話語言：下一則回覆起生效，立即寫入目前對話檔
-        - 介面語言：與目前不同時寫入 .env 並自動重新啟動程式
+        重啟時帶入 --lang 參數，跳過啟動語言選擇視窗，一次完成切換；
+        進行中的朗讀與請求會被中斷。
         """
         disp = self.lang_box.get()
         code = next((c for c, n in CONVO_LANGS if n == disp), None)
-        if not code:
+        if not code or code == UI_LANG:
             return
         self.convo_lang = code
         self.write_session_file()
         self._append(tr("msg_switched_lang").format(disp), "sys")
-        if code != UI_LANG:
-            try:
-                save_ui_lang(code)
-            except Exception as e:
-                self._append(tr("msg_ui_save_failed").format(e), "sys")
-                return
-            self._append(tr("msg_ui_restart"), "sys")
-            # 先啟動新程序再關閉舊視窗；進行中的朗讀與請求會被中斷
-            restart_app()
-            self.root.destroy()
+        self._append(tr("msg_ui_restart"), "sys")
+        restart_app(lang=code)
+        self.root.destroy()
 
     def on_model_selected(self, event=None):
         self.model_name = self.model_box.get()
@@ -1163,8 +1250,8 @@ class VoiceChatApp:
             self._emit("text", tr("msg_save_failed").format(e), "sys")
 
     def refresh_session_list(self, select=None):
-        """重掃 chats/ 更新下拉選單（主執行緒呼叫）。"""
-        pairs = scan_chat_files()
+        """重掃 chats/ 更新下拉選單（只列出目前語言的對話；主執行緒呼叫）。"""
+        pairs = scan_chat_files(self.convo_lang)
         self.session_paths = {d: p for d, p in pairs}
         names = [d for d, _ in pairs]
         self.session_box.configure(values=names)
@@ -1586,7 +1673,53 @@ class VoiceChatApp:
             winsound.PlaySound(wav_path, winsound.SND_FILENAME)
 
 
-if __name__ == "__main__":
+def main():
     root = tk.Tk()
-    VoiceChatApp(root)
+    root.withdraw()
+
+    # 切換語言時的重啟會帶 --lang 參數：此時不再詢問，直接套用該語言
+    arg_lang = None
+    for a in sys.argv[1:]:
+        if a.startswith("--lang="):
+            v = a.split("=", 1)[1].strip().lower()
+            if v in CONVO_LANG_NAMES:
+                arg_lang = v
+            break
+
+    # 啟動視窗本身先以預估語言（最新聊天紀錄的語言）呈現
+    set_ui_lang(arg_lang or latest_chat_lang())
+    chosen = arg_lang or ask_startup_language(root)
+
+    if chosen is None:
+        # 使用者取消語言選擇：結束程式
+        root.destroy()
+        return
+
+    set_ui_lang(chosen)
+    root.deiconify()
+    app = VoiceChatApp(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        # 啟動期錯誤寫入記錄檔並保留主控台訊息，避免程式無聲消失難以排查
+        import traceback
+
+        err = traceback.format_exc()
+        try:
+            (get_base_dir() / "startup_error.log").write_text(
+                err, encoding="utf-8"
+            )
+        except Exception:
+            pass
+        sys.stderr.write(err)
+        try:
+            input("\n發生錯誤，已寫入 startup_error.log。按 Enter 結束…")
+        except Exception:
+            pass
+        raise
