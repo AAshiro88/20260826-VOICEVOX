@@ -615,7 +615,7 @@ def ensure_lang_prefix(text, lang):
     return f"{tag}: {text.strip()}"
 
 
-_LINE_PREFIX_RE = re.compile(r"^(日|中|英)\s*[:：]\s*(.*)$")
+_LINE_PREFIX_RE = re.compile(r"^(日|中|英)\s*[:：]\s*(.*)$", re.MULTILINE)
 
 
 def _extract_prefixed(text):
