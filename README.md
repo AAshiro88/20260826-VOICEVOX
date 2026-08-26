@@ -31,7 +31,7 @@
 |------|------|
 | 作業系統 | Windows 10 以上（使用 winsound 播放音訊） |
 | Python | 3.8 以上（開發環境為 Anaconda） |
-| VOICEVOX | 產品版，啟動後引擎自動監聽 `127.0.0.1:50021` |
+| VOICEVOX | [產品版 0.25.2](https://voicevox.hiroshiba.jp/)（`voicevox-windows-directml-0.25.2.zip`），啟動後引擎自動監聽 `127.0.0.1:50021` |
 | 對話來源 | Ollama（本機）或 OpenRouter API 金鑰（擇一即可） |
 
 ## 安裝
