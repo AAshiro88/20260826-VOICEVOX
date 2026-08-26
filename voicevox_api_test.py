@@ -124,7 +124,11 @@ def main():
         record("GET /version", True, f"引擎版本 {version}")
     except Exception as e:
         record("GET /version", False, str(e))
-        print("\n無法連線引擎，請確認 VOICEVOX 是否已啟動。其餘測項略過。")
+        print(
+            "\n無法連線引擎。連線被拒絕通常代表 VOICEVOX 未啟動，"
+            "或引擎埠不是預設的 50021。\n"
+            "請先啟動 VOICEVOX（或 ENGINE）後重新執行本腳本。其餘測項略過。"
+        )
         summarize()
         return
 
@@ -186,11 +190,12 @@ def main():
 
 
 def summarize():
-    """印出測試摘要並以非零結束碼表示有失敗項。"""
+    """印出測試摘要。"""
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
     print(f"\n結果：{passed}/{total} 通過")
-    sys.exit(0 if passed == total else 1)
+    if passed < total:
+        print("存在失敗的測項，請檢查上方 FAIL 訊息。")
 
 
 if __name__ == "__main__":

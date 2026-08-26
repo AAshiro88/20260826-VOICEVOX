@@ -2,3 +2,5 @@
 __pycache__/
 db/
 .vscode/
+VOICEVOX/
+voicevox_engine-master/
