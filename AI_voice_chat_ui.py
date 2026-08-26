@@ -61,7 +61,7 @@ PREFERRED_SPEAKERS = [
 PREFERRED_MODELS = ["qwen3.6", "qwen3.5", "gemma4"]
 
 # OpenRouter 模型偏好關鍵字（用於預設選擇）
-PREFERRED_OPENROUTER_MODELS = ["gemini", "gpt", "claude"]
+PREFERRED_OPENROUTER_MODELS = ["ox-alpha", "gemini", "gpt", "claude"]
 
 SYSTEM_PROMPT = (
     "你是透過 VOICEVOX 語音合成與使用者對話的夥伴。VOICEVOX 只能朗讀日文，"
@@ -316,12 +316,17 @@ class VoiceChatApp:
                 "sys",
             )
 
-        # 載入 OpenRouter 模型清單（公開端點，不需金鑰）
+        # 載入 OpenRouter 模型清單（公開端點，不需金鑰），只保留免費模型與 ox-alpha
         if not OPENROUTER_API_KEY:
             self._emit("or_ng", "未設定金鑰")
         try:
             data = http_json("/models", OPENROUTER_URL, timeout=20)
-            ids = sorted(m["id"] for m in data.get("data", []))
+
+            def keep(model_id):
+                model_id = model_id.lower()
+                return model_id.endswith(":free") or "ox-alpha" in model_id
+
+            ids = sorted(m["id"] for m in data.get("data", []) if keep(m["id"]))
             self._emit("or_ok", "可用" + ("（金鑰已載入）" if OPENROUTER_API_KEY else "（未設金鑰）"))
             self._emit("or_models", ids)
         except Exception:
