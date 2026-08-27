@@ -6,17 +6,17 @@
 
 ## 功能特色
 
-- **語音朗讀**：AI 回覆逐句送 VOICEVOX 合成並播放，可隨時停止；**雙擊任何一則有底線的朗讀句子可重新播放**；只列出指定的 3 個聲音（猫使ビィ、小夜/SAYO、もち子さん）
+- **語音朗讀**：AI 回覆逐句送 VOICEVOX 合成並播放，可隨時停止；**雙擊任何一則有底線的朗讀句子可重新播放**；聲選擇採兩段式（角色→風格），偏好 3 個角色（猫使ビィ、小夜/SAYO、もち子さん）優先顯示
 - **AI 回覆統一 JSON 格式**：AI 必須輸出結構化 JSON（依語言模式動態欄位），前端依欄位拆出「對話顯示文字」與「朗讀用日文」，避免模型漏回答或漏欄位
 - **語言一鍵切換**：啟動時先彈出語言選擇視窗（日本語／中文／English，預設帶入**最新聊天紀錄的語言**）；每個對話綁定自己的語言，**對話清單只顯示相同語言的對話**；主畫面「語言」下拉切換後自動重啟套用
   - 日本語：回覆為純日文單行（`{"jp": "..."}`），送模型、顯示與朗讀都用同一份原文，不需翻譯
   - 中文：回覆為 `{"zh": "<繁體中文>", "jp": "<供 VOICEVOX 朗讀的日文>"}`；**送模型只送 `zh` 欄位，`jp` 不佔 token**
   - English：回覆為 `{"en": "<English>", "jp": "<供 VOICEVOX 朗讀的日文>"}`；**送模型只送 `en` 欄位，`jp` 不佔 token**
   - 朗讀一律使用 `jp` 欄位（VOICEVOX 只有日文發音正確）
-- **雙來源 LLM**：一鍵切換本機 Ollama 或 OpenRouter（OpenRouter 顯示全部模型，不限制免費）
+- **雙來源 LLM**：一鍵切換本機 Ollama 或 OpenRouter（顯示全部模型，模型 Combobox 可編輯即時篩選關鍵字）
 - **多重對話管理**：每個對話存成獨立 JSON，可開新對話、載入、改名、刪除；記錄當下使用的聲音／服務／模型／語言，載入時自動還原
 - **自動命名**：新對話先以時間戳命名，第一則回覆後由 AI 自動取標題（標題語言跟隨對話語言），之後可手動改名；允許多個對話同名（清單自動加編號區分）
-- **角色設定**：自訂 AI 人設（例如「傲嬌的妹妹」），跟著對話一起存在 chats/*.json，載入對話即還原人設
+- **角色設定**：自訂 AI 人設（例如「傲嬌的妹妹」），可透過「編輯」按鈕開啟多行對話框輸入完整角色描述（含範本載入），跟著對話一起存在 chats/*.json，載入對話即還原人設
 - **歷史自動摘要**：對話過長時自動呼叫目前模型整理成重點摘要＋保留最近數則原文（摘要輸入同樣只取對話語言）；整理中暫停接受新訊息
 - **雙語顯示**：中文／English 模式下，AI 以「對話語言（主要行）＋日文朗讀行（灰色底線）」顯示，看得到也聽得到
 - **重新生成**：AI 回覆不滿意或格式壞掉時，按「重新生成」按鈕移除最後一則回覆並重新呼叫模型生成
@@ -30,9 +30,9 @@
 ├─ ollama_voice_chat.py     舊版純命令列介面（僅支援 Ollama，保留備用）
 ├─ voicevox_api_test.py     VOICEVOX 引擎 API 連通測試腳本
 ├─ locales/                 介面多國語系
-│  ├─ zh.json               繁體中文（79 鍵）
-│  ├─ ja.json               日本語（79 鍵）
-│  └─ en.json               English（79 鍵）
+│  ├─ zh.json               繁體中文（86 鍵）
+│  ├─ ja.json               日本語（86 鍵）
+│  └─ en.json               English（86 鍵）
 ├─ .env                     OPENROUTER_API_KEY（金鑰，不上 GIT）
 └─ chats/                   對話紀錄（chat_日期_時間_毫秒.json，含角色設定）
 ```
@@ -97,11 +97,9 @@ C:\ProgramData\Anaconda3\python.exe AI_voice_chat_ui.py
 | 區塊 | 說明 |
 |------|------|
 | 狀態列 | 即時顯示引擎／Ollama／OpenRouter 連線狀態（綠＝正常、紅＝未連線） |
-| 服務／聲音／模型／語言 | 切換對話來源、朗讀聲音、使用的模型與語言；「語言」切換後自動重啟，介面與對話皆套用新語言 |
-| 停止朗讀 | 中斷目前與後續句子的播放 |
-| 重新生成 | 移除最後一則 AI 回覆並重新呼叫模型生成（忙碌中或無回覆時 disabled） |
-| 重播 | 雙擊對話區任何一則有底線的朗讀句子即可重新合成播放 |
-| 角色 | 輸入人設後按「套用角色」，下一則訊息起生效 |
+| 聲音列 | Provider 切換 → 角色 Combobox（偏好 3 個角色優先顯示，取消勾選「偏好」展開全部）→ 風格 Combobox（對應角色的朗讀風格）→ 偏好篩選 checkbox |
+| 模型列 | 模型 Combobox（可編輯+即時篩選，右側有文字輸入框可過濾關鍵字）→ 語言切換（自動重啟）→ 停止朗讀 |
+| 角色列 | 單行摘要 Entry（width=18）→「編輯」按鈕開啟多行對話框 →「套用」按鈕或 Enter 套用角色 |
 | 對話列 | 開新對話（綁定目前語言）／載入／改名／刪除；**清單只顯示目前語言的對話** |
 | 輸入區 | Enter 送出、Shift+Enter 換行 |
 
@@ -162,7 +160,7 @@ python ollama_voice_chat.py
 
 ## 程式架構
 
-`AI_voice_chat_ui.py`（約 1610 行）是單一檔案的純標準庫程式，主要區塊如下：
+`AI_voice_chat_ui.py`（約 1880 行）是單一檔案的純標準庫程式，主要區塊如下：
 
 ```text
 AI_voice_chat_ui.py
@@ -176,14 +174,18 @@ AI_voice_chat_ui.py
 │                    detect_lang()
 ├─ 其他純函式        split_sentences() / sanitize_filename() / clean_title()
 │                    new_chat_filename() / scan_chat_files()
+├─ PREFERRED_SPEAKERS / _PERSONA_TEMPLATE
 ├─ class VoiceChatApp（Tkinter 主程式）
-│   ├─ UI 建置        _build_widgets() / _clear_chat_display() / _append() / _register_ai_message()
+│   ├─ UI 建置        _build_widgets()（4 列佈局：狀態/聲/模型/角色）/ _clear_chat_display()
+│   │                 / _append() / _register_ai_message()
 │   ├─ 佇列輪詢       _poll_queue() / _emit()（背景執行緒 → 主執行緒更新畫面）
 │   ├─ 後端初始化     init_backend() / _collect_voices() / _load_voices() / _apply_models()
-│   ├─ 事件處理       on_provider_selected() / on_voice_selected() / on_lang_selected() / on_model_selected()
+│   ├─ 事件處理       on_provider_selected() / on_speaker_selected() / on_voice_style_selected()
+│   │                 / on_toggle_preferred_voices() / on_model_selected()
+│   │                 / _on_model_filter() / _on_model_filter_entry() / on_lang_selected()
 │   ├─ 對話管理       new_session() / load_selected_session() / rename / delete
 │   │                 handle_restore() / write_session_file() / refresh_session_list()
-│   ├─ 角色設定       apply_persona() / build_system_prompt()
+│   ├─ 角色設定       apply_persona() / build_system_prompt() / open_persona_editor()
 │   ├─ 訊息流程       send_message() / _on_return() / retry_last() / chat_worker()
 │   ├─ 後台工作       call_llm() / maybe_summarize() / auto_title_worker() / speak()
 │   └─ 停止與重播     stop_speaking() / replay_message()
@@ -251,6 +253,8 @@ AI_voice_chat_ui.py
 | 對話清單找不到某個對話 | 該對話綁定的是其他語言；把「語言」下拉切到該語言即會出現（舊檔案視為中文） |
 | 介面顯示為英文／日文 | 預設會帶入最新對話的語言；想改可於啟動時的語言視窗選擇，或用主畫面「語言」下拉切換（會自動重啟） |
 | 介面翻譯缺漏 | `locales/{zh,ja,en}.json` 找不到對應鍵時，介面會退回繁體中文，若仍無則顯示原 key；可自行編輯 JSON 補上 |
+| 模型清單太多找不到 | 在模型列右側的篩選輸入框打關鍵字即可即時過濾；Ollama 與 OpenRouter 皆適用 |
+| 角色設定太長沒地方寫 | 按「編輯」按鈕開啟多行對話框，可輸入完整角色描述（含範本），確定後自動更新摘要 |
 
 摘要門檻與保留則數可在 `AI_voice_chat_ui.py` 頂部的 `HISTORY_CHAR_LIMIT`、`KEEP_RECENT_MESSAGES` 調整。
 
