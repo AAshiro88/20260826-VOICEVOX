@@ -6,19 +6,21 @@
 
 ## 功能特色
 
-- **語音朗讀**：AI 回覆逐句送 VOICEVOX 合成並播放，可隨時停止；**雙擊任何一則有底線的朗讀句子可重新播放**；只列出指定的 3 個聲音（猫使ビィ、小夜/SAYO、もち子さん）；中文回覆無日文行時自動跳過朗讀（避免 VOICEVOX 硬唸中文）
-- **語言偵測與自動修復**：AI 回覆缺少 `日:`/`中:`/`英:` 前綴時，自動偵測語言並補上標籤，確保朗讀與模型記憶正確；載入舊對話檔時同步修復壞標籤並寫回磁碟（一次性）
+- **語音朗讀**：AI 回覆逐句送 VOICEVOX 合成並播放，可隨時停止；**雙擊任何一則有底線的朗讀句子可重新播放**；只列出指定的 3 個聲音（猫使ビィ、小夜/SAYO、もち子さん）
+- **AI 回覆統一 JSON 格式**：AI 必須輸出結構化 JSON（依語言模式動態欄位），前端依欄位拆出「對話顯示文字」與「朗讀用日文」，避免模型漏回答或漏欄位
 - **語言一鍵切換**：啟動時先彈出語言選擇視窗（日本語／中文／English，預設帶入**最新聊天紀錄的語言**）；每個對話綁定自己的語言，**對話清單只顯示相同語言的對話**；主畫面「語言」下拉切換後自動重啟套用
-  - 日本語：回覆為純日文單行，送模型、顯示與朗讀都用同一份原文，不需翻譯
-  - 中文／English：回覆含「日:」行供 VOICEVOX 合成；**送模型時只送該語言行，日文朗讀行不佔 token**
-  - 朗讀一律使用日文行（VOICEVOX 只有日文發音正確）
-- **雙來源 LLM**：一鍵切換本機 Ollama 或 OpenRouter（模型清單只保留免費模型與 ox-alpha）
+  - 日本語：回覆為純日文單行（`{"jp": "..."}`），送模型、顯示與朗讀都用同一份原文，不需翻譯
+  - 中文：回覆為 `{"zh": "<繁體中文>", "jp": "<供 VOICEVOX 朗讀的日文>"}`；**送模型只送 `zh` 欄位，`jp` 不佔 token**
+  - English：回覆為 `{"en": "<English>", "jp": "<供 VOICEVOX 朗讀的日文>"}`；**送模型只送 `en` 欄位，`jp` 不佔 token**
+  - 朗讀一律使用 `jp` 欄位（VOICEVOX 只有日文發音正確）
+- **雙來源 LLM**：一鍵切換本機 Ollama 或 OpenRouter（OpenRouter 顯示全部模型，不限制免費）
 - **多重對話管理**：每個對話存成獨立 JSON，可開新對話、載入、改名、刪除；記錄當下使用的聲音／服務／模型／語言，載入時自動還原
 - **自動命名**：新對話先以時間戳命名，第一則回覆後由 AI 自動取標題（標題語言跟隨對話語言），之後可手動改名；允許多個對話同名（清單自動加編號區分）
 - **角色設定**：自訂 AI 人設（例如「傲嬌的妹妹」），跟著對話一起存在 chats/*.json，載入對話即還原人設
 - **歷史自動摘要**：對話過長時自動呼叫目前模型整理成重點摘要＋保留最近數則原文（摘要輸入同樣只取對話語言）；整理中暫停接受新訊息
 - **雙語顯示**：中文／English 模式下，AI 以「對話語言（主要行）＋日文朗讀行（灰色底線）」顯示，看得到也聽得到
-- **重新生成**：AI 回覆不满意或格式壞掉時，按「重新生成」按鈕移除最後一則回覆並重新呼叫模型生成
+- **重新生成**：AI 回覆不滿意或格式壞掉時，按「重新生成」按鈕移除最後一則回覆並重新呼叫模型生成
+- **介面文字外部化**：`locales/{zh,ja,en}.json` 維護三語介面字串，方便增刪與在地化
 
 ## 檔案結構
 
@@ -27,6 +29,10 @@
 ├─ AI_voice_chat_ui.py      主程式（Tkinter 圖形介面）
 ├─ ollama_voice_chat.py     舊版純命令列介面（僅支援 Ollama，保留備用）
 ├─ voicevox_api_test.py     VOICEVOX 引擎 API 連通測試腳本
+├─ locales/                 介面多國語系
+│  ├─ zh.json               繁體中文（79 鍵）
+│  ├─ ja.json               日本語（79 鍵）
+│  └─ en.json               English（79 鍵）
 ├─ .env                     OPENROUTER_API_KEY（金鑰，不上 GIT）
 └─ chats/                   對話紀錄（chat_日期_時間_毫秒.json，含角色設定）
 ```
@@ -116,7 +122,7 @@ python ollama_voice_chat.py
 | `start_ai_voice_chat.bat` | 雙擊直接啟動主程式（自動找 Anaconda Python） |
 | `build_exe.bat` | 以 PyInstaller 打包成單一執行檔 `dist\AI_VoiceChat_UI.exe` |
 
-打包注意：**`.env` 與 `chats/` 不會被封裝進 exe**。程式在打包模式（frozen）下會改以 exe 所在資料夾作為基底目錄，因此使用 exe 前請手動把 `.env` 複製到 `dist\` 旁；`chats\` 會在首次存檔時自動建立在 exe 旁。
+打包注意：**`.env`、`chats/`、`locales/` 不會被封裝進 exe**。程式在打包模式（frozen）下會改以 exe 所在資料夾作為基底目錄，因此使用 exe 前請手動把 `.env` 與 `locales/` 複製到 `dist\` 旁；`chats\` 會在首次存檔時自動建立在 exe 旁。
 
 ## 對話檔案格式
 
@@ -134,7 +140,7 @@ python ollama_voice_chat.py
   "persona": "傲嬌的妹妹",
   "history": [
     { "role": "user", "content": "你好" },
-    { "role": "assistant", "content": "日: ...\n中: ..." },
+    { "role": "assistant", "content": "{\"zh\": \"你好呀！\", \"jp\": \"やあ！\"}" },
     { "role": "system", "content": "以下是更早對話的重點摘要：..." }
   ]
 }
@@ -142,31 +148,32 @@ python ollama_voice_chat.py
 
 `history` 中 role 為 system 的項目是自動摘要產物，載入重播時不顯示。`persona` 是該對話專屬的角色設定，載入時自動還原到介面輸入框。`lang` 是該對話綁定的語言（`ja`／`zh`／`en`），同時決定它在對話清單中的歸屬——**清單只顯示目前語言的對話**；舊檔案沒有此欄位時視為 `zh`，不需遷移。
 
-載入對話時，程式會自動檢查所有 assistant 回覆是否有語言前綴（`日:`/`中:`/`英:`），缺少時依 `lang` 補上並寫回磁碟。此修復為一次性，不影響對話內容。
+> 舊版對話以 `日:`／`中:`／`英:` 純文字前綴儲存 assistant 內容；本版本**只支援新 JSON 格式**，舊對話載入時若 assistant 內容不是合法 JSON，相關訊息會顯示為空，可按「重新生成」重來。
 
 各語言的回覆格式：
 
-| 語言 | 回覆內容 | 送模型的 assistant 內容 | 朗讀 |
-|------|---------|------------------------|------|
-| `ja` | 純日文單行 | 原文整段 | 原文（VOICEVOX 合成） |
-| `zh` | 「日:」＋「中:」兩行 | 只送「中:」的內容 | 取「日:」行；無日文行時跳過朗讀 |
-| `en` | 「英:」＋「日:」兩行 | 只送「英:」的內容 | 取「日:」行；無日文行時跳過朗讀 |
+| 語言 | AI 必須輸出的 JSON | 送模型的 assistant 內容 | 朗讀 |
+|------|-------------------|------------------------|------|
+| `ja` | `{"jp": "..."}` | 整個 `jp` 欄位 | `jp` 欄位（VOICEVOX 合成） |
+| `zh` | `{"zh": "...", "jp": "..."}` | 只送 `zh` 欄位 | 取 `jp` 欄位；無 `jp` 時跳過朗讀 |
+| `en` | `{"en": "...", "jp": "..."}` | 只送 `en` 欄位 | 取 `jp` 欄位；無 `jp` 時跳過朗讀 |
 
-AI 回覆缺少前綴時，程式自動偵測語言並補上標籤。朗讀一律取「日:」行（`ja` 模式為原文本身）；若回覆只有中文行（無日文翻譯），則不送 VOICEVOX（避免硬唸中文產生怪音）。
+`llm_view()` 送模型時只取對話語言欄位，`jp` 朗讀欄位不佔 token。`reply_parts()` 把回覆拆成「顯示文字」與「朗讀文字」。
 
 ## 程式架構
 
-`AI_voice_chat_ui.py`（約 1860 行）是單一檔案的純標準庫程式，主要區塊如下：
+`AI_voice_chat_ui.py`（約 1610 行）是單一檔案的純標準庫程式，主要區塊如下：
 
 ```text
 AI_voice_chat_ui.py
-├─ 環境與路徑        ENGINE_URL / OLLAMA_URL / OPENROUTER_URL / ENV_PATH / CHATS_DIR
+├─ 環境與路徑        ENGINE_URL / OLLAMA_URL / OPENROUTER_URL / ENV_PATH / CHATS_DIR / LOCALES_DIR
 ├─ .env 載入         load_env() → OPENROUTER_API_KEY（金鑰存於記憶體，不寫入輸出）
-├─ 三語文字表        TR_TEXTS（zh/ja/en 各 100+ 鍵）+ set_ui_lang() + tr()
+├─ 介面文字載入      load_locale() / get_locale_dict() / set_ui_lang() / tr()
+│                    （自 locales/{zh,ja,en}.json 動態載入，缺漏退回繁體中文）
 ├─ 語言與提示詞      CONVO_LANGS / SYSTEM_PROMPTS / SUMMARY_ASKS / SUMMARY_HEADERS / TITLE_ASKS
 ├─ HTTP 輔助         http_json() / post_json()（urllib 標準庫）
-├─ 回覆解析          detect_lang() / ensure_lang_prefix() / _extract_prefixed()
-│                    reply_parts() / assistant_conv_text() / llm_view()
+├─ 回覆解析          _extract_json() / reply_parts() / assistant_conv_text() / llm_view()
+│                    detect_lang()
 ├─ 其他純函式        split_sentences() / sanitize_filename() / clean_title()
 │                    new_chat_filename() / scan_chat_files()
 ├─ class VoiceChatApp（Tkinter 主程式）
@@ -208,9 +215,8 @@ AI_voice_chat_ui.py
   → 背景執行緒 chat_worker()
       → 歷史過長先 maybe_summarize()（壓縮舊訊息）
       → call_llm() 呼叫 Ollama 或 OpenRouter
-      → ensure_lang_prefix() 補上語言前綴
-      → 存入 history → write_session_file() 存檔
-      → reply_parts() 拆成（顯示文字, 朗讀文字）
+      → 原始回覆存入 history → write_session_file() 存檔
+      → _extract_json() + reply_parts() 拆成（顯示文字, 朗讀文字）
       → _emit("ai_msg", conv, voice) 更新畫面
       → speak(voice) 逐句送往 VOICEVOX 合成並播放
 ```
@@ -218,10 +224,9 @@ AI_voice_chat_ui.py
 ### 語言與回覆格式
 
 - 對話語言 `lang`（`ja`/`zh`/`en`）綁定在各對話檔。
-- 回覆格式：`日:`（朗讀）、`中:`／`英:`（對話）。
-- `llm_view()` 送模型時只取對話語言行，日文朗讀行不佔 token。
-- `reply_parts()` 把回覆拆成「顯示文字」與「朗讀文字」。
-- `ensure_lang_prefix()`＋`detect_lang()`：回覆缺少前綴時自動偵測並補上；無日文行則不朗讀。
+- AI 回覆一律為 JSON 格式，欄位依語言動態決定（`ja` 只輸出 `jp`；`zh`/`en` 輸出對話語言 + `jp`）。
+- `llm_view()` 送模型時只取對話語言欄位，`jp` 朗讀欄位不佔 token。
+- `reply_parts()` 從 JSON 拆出「顯示文字」與「朗讀文字」。
 
 ### 重新生成邏輯（retry_last）
 
@@ -238,12 +243,14 @@ AI_voice_chat_ui.py
 |------|-----------|
 | `[WinError 10061] 無法連線` | VOICEVOX 未啟動或埠不是 50021，先啟動 VOICEVOX |
 | `HTTP Error 405` | `/audio_query` 必須用 POST（現行程式碼已正確處理） |
-| OpenRouter `HTTP Error 429` | 免費模型有頻率限制，稍候再試或換一個免費模型 |
+| OpenRouter `HTTP Error 429` | 免費模型有頻率限制，稍候再試或換一個模型 |
 | 找不到偏好的 3 個聲音 | VOICEVOX 版本未含這些角色，請更新或改用其他聲音測試 |
-| 中文／英文朗讀發音怪怪的 | AI 回覆缺少語言前綴時，程式已自動偵測語言並補上標籤；若仍有問題可按「重新生成」重來一次 |
+| 中文／英文朗讀發音怪怪的 | AI 回覆缺少 `jp` 欄位時不會送 VOICEVOX（避免硬唸中文產生怪音）；可按「重新生成」重來一次 |
 | 對話出現「整理歷史中」 | 歷史超過 5000 字元觸發自動摘要，完成前無法送出新訊息 |
 | 切換語言沒有生效 | 「語言」下拉切換會自動重啟並直接套用（跳過啟動選單）；啟動時也可在語言視窗重新選擇 |
 | 對話清單找不到某個對話 | 該對話綁定的是其他語言；把「語言」下拉切到該語言即會出現（舊檔案視為中文） |
+| 介面顯示為英文／日文 | 預設會帶入最新對話的語言；想改可於啟動時的語言視窗選擇，或用主畫面「語言」下拉切換（會自動重啟） |
+| 介面翻譯缺漏 | `locales/{zh,ja,en}.json` 找不到對應鍵時，介面會退回繁體中文，若仍無則顯示原 key；可自行編輯 JSON 補上 |
 
 摘要門檻與保留則數可在 `AI_voice_chat_ui.py` 頂部的 `HISTORY_CHAR_LIMIT`、`KEEP_RECENT_MESSAGES` 調整。
 
@@ -255,4 +262,4 @@ AI_voice_chat_ui.py
 - `VOICEVOX/`、`voicevox_engine-master/`、各壓縮檔——龐大的二進位資產
 - `__pycache__/`
 
-`chats/` 屬一般資料，預設會納入版本控制；若對話內容涉及隱私，請自行將 `chats/` 加入 `.gitignore`。
+`chats/`、`locales/` 屬一般資料，預設會納入版本控制；若對話內容涉及隱私，請自行將 `chats/` 加入 `.gitignore`。
