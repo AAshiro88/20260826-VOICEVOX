@@ -42,6 +42,7 @@
   "msg_switched_lang": "[言語を切り替えました：{}（再起動後に表示と一覧に適用）]\n",
   "msg_ui_restart": "[言語を切り替えるため、プログラムを再起動します…]\n",
   "msg_no_session_persona": "[会話が未作成のため、人格を適用できません]\n",
+  "msg_need_session": "[先に「新しい会話」を押して chat を作成してください]\n",
   "msg_persona_applied": "[「{}」に人格設定を適用しました：{}]\n",
   "msg_persona_cleared": "[「{}」の人格設定を消去し、デフォルトに戻しました]\n",
   "you_prefix": "あなた＞ ",

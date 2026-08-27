@@ -42,6 +42,7 @@
   "msg_switched_lang": "[語言已切換：{}（重新啟動後套用介面與對話清單）]\n",
   "msg_ui_restart": "[語言切換中，程式即將自動重新啟動…]\n",
   "msg_no_session_persona": "[尚未建立對話，無法套用角色]\n",
+  "msg_need_session": "[請先按「開新對話」建立 chat]\n",
   "msg_persona_applied": "[角色設定已套用到「{}」：{}]\n",
   "msg_persona_cleared": "[已清除「{}」的角色設定，回到預設]\n",
   "you_prefix": "你＞ ",

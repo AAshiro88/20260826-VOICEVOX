@@ -144,7 +144,7 @@ def tr(key):
     return key
 
 
-def restart_app(lang=None):
+def restart_app(lang=None, chat_path=None):
     """以相同直譯器（或打包後的同一個 exe）重新啟動程式。
 
     帶入 lang 時附加 --lang 參數，重新啟動後跳過語言選擇視窗直接套用。
@@ -157,6 +157,8 @@ def restart_app(lang=None):
         args = [sys.executable, str(Path(__file__).resolve())]
     if lang:
         args.append(f"--lang={lang}")
+    if chat_path:
+        args.append(f"--chat={chat_path}")
     flags = getattr(subprocess, "DETACHED_PROCESS", 0)
     subprocess.Popen(args, close_fds=True, creationflags=flags)
 
@@ -249,6 +251,29 @@ PREFERRED_SPEAKERS = [
     ("sayo", ["sayo", "さよ", "小夜"]),
     ("mochikosan", ["mochikosan", "mochiko", "もち子"]),
 ]
+
+# 常見 VOICEVOX 風格的人工校對譯名。保留日文原文並列顯示；其餘未收錄
+# 的風格才由 deep-translator 在背景補譯，避免翻譯服務暫時失敗時整列仍是日文。
+VOICE_STYLE_TRANSLATIONS = {
+    "zh": {
+        "ノーマル": "普通", "あまあま": "撒嬌", "ツンツン": "傲嬌",
+        "セクシー": "性感", "ささやき": "耳語", "ヒソヒソ": "低語",
+        "ヘロヘロ": "有氣無力", "なみだめ": "含淚", "楽々": "輕鬆",
+        "怒り": "憤怒", "悲しみ": "悲傷", "喜び": "喜悅",
+        "びっくり": "驚訝", "おこ": "生氣", "クール": "冷靜",
+        "ハイテンション": "高亢", "低音": "低沉", "高音": "高音",
+        "実況": "實況", "朗読": "朗讀", "歌唱": "歌唱",
+    },
+    "en": {
+        "ノーマル": "Normal", "あまあま": "Sweet", "ツンツン": "Tsundere",
+        "セクシー": "Sexy", "ささやき": "Whisper", "ヒソヒソ": "Soft whisper",
+        "ヘロヘロ": "Weak", "なみだめ": "Tearful", "楽々": "Relaxed",
+        "怒り": "Angry", "悲しみ": "Sad", "喜び": "Happy",
+        "びっくり": "Surprised", "おこ": "Angry", "クール": "Cool",
+        "ハイテンション": "High energy", "低音": "Low pitch", "高音": "High pitch",
+        "実況": "Commentary", "朗読": "Narration", "歌唱": "Singing",
+    },
+}
 
 # 模型偏好順序
 PREFERRED_MODELS = ["qwen3.6", "qwen3.5", "gemma4"]
@@ -633,7 +658,7 @@ atexit.register(shutil.rmtree, TMP_DIR, ignore_errors=True)
 
 
 class VoiceChatApp:
-    def __init__(self, root):
+    def __init__(self, root, restore_path=None):
         self.root = root
         root.title(tr("app_title"))
         # 控制列較多，800x640 會讓多行輸入框看起來過於狹窄；每次啟動
@@ -646,9 +671,9 @@ class VoiceChatApp:
         self.speaker_id = None
         self.model_name = ""
         self.provider = "ollama"
-        # 對話語言（ja＝純日文；zh／en＝對話語言＋日文朗讀行的兩行格式），
-        # 由啟動時的語言選擇（或重啟帶入的 --lang）決定
+        # 對話語言屬於 chat 本身；UI_LANG 則只控制介面文字。
         self.convo_lang = UI_LANG
+        self.restore_path = Path(restore_path) if restore_path else None
         self.ollama_models = []
         self.openrouter_models = []
         self.busy = False
@@ -674,6 +699,7 @@ class VoiceChatApp:
         self.show_only_free = True        # OpenRouter 模型：只顯示 :free / ox-alpha
         self.speaker_map = {}             # 角色名稱 → (uuid, [(style_name, style_id), ...])
         self.style_map = {}               # styleId → (speaker_name, style_name)
+        self.style_translations = {}      # 日文風格名 → 目前介面語言的譯名
         self.all_voices = []              # 完整角色清單（未篩選）
         self._all_model_list = []         # 完整模型清單（未篩選）
 
@@ -720,7 +746,8 @@ class VoiceChatApp:
         self.speaker_box.pack(side="left", padx=(4, 2))
         self.speaker_box.bind("<<ComboboxSelected>>", self.on_speaker_selected)
         ttk.Label(mid, text=tr("lbl_voice_style")).pack(side="left")
-        self.style_box = ttk.Combobox(mid, state="readonly", width=14)
+        # 類型同時顯示譯名、日文原文與 styleId，需要較寬欄位避免被截斷。
+        self.style_box = ttk.Combobox(mid, state="readonly", width=32)
         self.style_box.pack(side="left", padx=(2, 4))
         self.style_box.bind("<<ComboboxSelected>>", self.on_voice_style_selected)
         # 偏好角色篩選（預設勾選＝只顯示 PREFERRED_SPEAKERS 的角色）
@@ -896,6 +923,8 @@ class VoiceChatApp:
                     self.or_status.configure(text=msg[1], foreground="#c62828")
                 elif kind == "voices":
                     self._load_voices(msg[1])
+                elif kind == "style_translations":
+                    self._apply_style_translations(msg[1])
                 elif kind == "ollama_models":
                     self.ollama_models = msg[1]
                     if self.provider == "ollama":
@@ -953,6 +982,14 @@ class VoiceChatApp:
         if not voices:
             self._emit("text", tr("msg_no_voices"), "sys")
         self._emit("voices", voices)
+        # 已知常用類型先立刻顯示人工校對譯名，不必等網路翻譯。
+        builtin_translations = dict(VOICE_STYLE_TRANSLATIONS.get(UI_LANG, {}))
+        if builtin_translations:
+            self._emit("style_translations", builtin_translations)
+        # 風格名稱的翻譯可能需要網路，放在背景初始化執行，避免卡住 Tk UI。
+        translations = self._translate_voice_styles(voices, UI_LANG)
+        if translations and translations != builtin_translations:
+            self._emit("style_translations", translations)
 
         # 檢查 Ollama 並載入模型清單
         try:
@@ -989,12 +1026,22 @@ class VoiceChatApp:
             self._emit("or_ng", tr("list_failed"))
             self._emit("or_models", [])
 
-        # 掃描目前語言的既有對話，準備還原最近使用的
+        # 掃描目前介面語言的既有對話，準備還原最近使用的。
+        # 介面語言切換時，--chat 會指定繼續開啟原 chat，即使其語言不同。
         pairs = scan_chat_files(self.convo_lang)
+        latest = None
+        if self.restore_path and self.restore_path.exists():
+            try:
+                data = json.loads(self.restore_path.read_text(encoding="utf-8"))
+                display = data.get("name") or self.restore_path.stem
+                if not any(path == self.restore_path for _name, path in pairs):
+                    pairs.insert(0, (display, self.restore_path))
+                latest = (data, str(self.restore_path))
+            except Exception:
+                latest = None
         names = [d for d, _ in pairs]
         paths = {d: str(p) for d, p in pairs}
-        latest = None
-        if pairs:
+        if latest is None and pairs:
             disp, p = pairs[0]
             try:
                 latest = (json.loads(p.read_text(encoding="utf-8")), str(p))
@@ -1046,6 +1093,61 @@ class VoiceChatApp:
             first_name = self.speaker_box["values"][0]
             self.speaker_box.set(first_name)
             self.on_speaker_selected(announce=False)
+
+    def _translate_voice_styles(self, voices, lang):
+        """以 deep-translator 將 VOICEVOX 日文風格名稱翻成目前介面語言。"""
+        if lang == "ja":
+            return {}
+        translated_map = dict(VOICE_STYLE_TRANSLATIONS.get(lang, {}))
+        target = {"zh": "zh-TW", "en": "en"}.get(lang)
+        if not target:
+            return translated_map
+        names = sorted({
+            style_name
+            for _speaker, _uuid, styles in voices
+            for style_name, _style_id in styles
+            if style_name.strip() and style_name not in translated_map
+        })
+        if not names or GoogleTranslator is None:
+            return translated_map
+        try:
+            remote_translations = GoogleTranslator(source="ja", target=target).translate_batch(names)
+            translated_map.update({
+                name: result.strip()
+                for name, result in zip(names, remote_translations)
+                if result and result.strip() and result.strip() != name
+            })
+        except Exception:
+            pass
+        return translated_map
+
+    def _style_label(self, style_name, style_id):
+        """建立下拉選單標籤；譯名與原始日文並列，styleId 保持可機器解析。"""
+        translated = self.style_translations.get(style_name)
+        if translated:
+            if UI_LANG == "zh":
+                style_name = f"{translated}（{style_name}）"
+            else:
+                style_name = f"{translated} ({style_name})"
+        return f"{style_name} [styleId={style_id}]"
+
+    def _apply_style_translations(self, translations):
+        """接收背景翻譯結果，刷新目前角色的風格標籤並保留既有選擇。"""
+        self.style_translations = translations
+        name = self.speaker_box.get()
+        info = self.speaker_map.get(name)
+        if not info:
+            return
+        _uuid, styles = info
+        selected_id = self.speaker_id
+        self.style_box["values"] = [
+            self._style_label(style_name, style_id)
+            for style_name, style_id in styles
+        ]
+        for style_name, style_id in styles:
+            if style_id == selected_id:
+                self.style_box.set(self._style_label(style_name, style_id))
+                break
 
     def _apply_voice_filter(self):
         """依 self.show_only_preferred 篩選角色清單，填入 speaker_box。"""
@@ -1158,7 +1260,9 @@ class VoiceChatApp:
             return
         _uuid, styles = info
         # 風格清單（顯示用：含樣式名稱 + styleId）
-        self.style_box["values"] = [f"{s_name} [styleId={s_id}]" for s_name, s_id in styles]
+        self.style_box["values"] = [
+            self._style_label(s_name, s_id) for s_name, s_id in styles
+        ]
         if styles:
             self.style_box.current(0)
             self.on_voice_style_selected(announce=announce)
@@ -1202,20 +1306,16 @@ class VoiceChatApp:
             self.on_speaker_selected(announce=False)
 
     def on_lang_selected(self, event=None):
-        """切換語言：綁定目前對話的新語言並存檔後，自動重新啟動套用。
-
-        重啟時帶入 --lang 參數，跳過啟動語言選擇視窗，一次完成切換；
-        進行中的朗讀與請求會被中斷。
-        """
+        """只切換介面語言，保留目前 chat 的語言與檔案內容。"""
         disp = self.lang_box.get()
         code = next((c for c, n in CONVO_LANGS if n == disp), None)
         if not code or code == UI_LANG:
             return
-        self.convo_lang = code
+        if self.busy:
+            self.lang_box.set(CONVO_LANG_NAMES[UI_LANG])
+            return
         self.write_session_file()
-        self._append(tr("msg_switched_lang").format(disp), "sys")
-        self._append(tr("msg_ui_restart"), "sys")
-        restart_app(lang=code)
+        restart_app(lang=code, chat_path=str(self.current_path) if self.current_path else None)
         self.root.destroy()
 
     def on_model_selected(self, event=None):
@@ -1226,7 +1326,12 @@ class VoiceChatApp:
     def handle_restore(self, data, path_str):
         """還原一個對話工作階段；data 為 None 時建立全新對話。"""
         if not data:
-            self.new_session(first=True)
+            # 沒有聊天紀錄時維持空白畫面；必須由使用者按「開新對話」才建立檔案。
+            self.current_session = None
+            self.current_path = None
+            self.history = []
+            self._clear_chat_display()
+            self._append(tr("msg_need_session"), "sys")
             return
 
         provider = data.get("provider")
@@ -1277,9 +1382,9 @@ class VoiceChatApp:
                 self.model_box.set(saved_model)
             self.model_name = self.model_box.get()
 
-        # 還原對話語言
+        # 還原 chat 的語言；介面下拉則維持 UI_LANG，兩者可不同。
         self.convo_lang = session["lang"]
-        self.lang_box.set(CONVO_LANG_NAMES[self.convo_lang])
+        self.lang_box.set(CONVO_LANG_NAMES[UI_LANG])
 
         # 還原聲音（若該 styleId 仍存在）
         speaker_note = ""
@@ -1296,7 +1401,7 @@ class VoiceChatApp:
                             self.speaker_box.set(name)
                             self.on_speaker_selected(announce=False)
                             # 設定正確的 style
-                            target_label = f"{s_name} [styleId={s_id}]"
+                            target_label = self._style_label(s_name, s_id)
                             if target_label in self.style_box["values"]:
                                 self.style_box.set(target_label)
                                 self.on_voice_style_selected(announce=False)
@@ -1385,6 +1490,9 @@ class VoiceChatApp:
         if self.current_session is not None:
             self.write_session_file()
 
+        # 新 chat 才採用目前介面選定的語言；既有 chat 絕不改語言。
+        self.convo_lang = UI_LANG
+
         path = new_chat_filename()
         display_name = datetime.now().strftime("對話_%Y%m%d_%H%M%S")
 
@@ -1467,7 +1575,7 @@ class VoiceChatApp:
         self._append(tr("msg_renamed").format(base_name, new_name), "sys")
 
     def delete_selected_session(self):
-        """刪除選中的對話檔案；若是目前對話則另開新對話。"""
+        """刪除選中的對話檔案；若是目前對話則回到空白狀態。"""
         if self.busy:
             return
         name = self.session_box.get()
@@ -1489,8 +1597,10 @@ class VoiceChatApp:
             self.current_session = None
             self.current_path = None
             self.history = []
-            self.new_session()
-            self._append(tr("msg_deleted_new").format(name), "sys")
+            self._clear_chat_display()
+            self.refresh_session_list()
+            self._append(tr("msg_deleted").format(name), "sys")
+            self._append(tr("msg_need_session"), "sys")
         else:
             self.refresh_session_list()
             self._append(tr("msg_deleted").format(name), "sys")
@@ -1603,6 +1713,9 @@ class VoiceChatApp:
     def send_message(self):
         user_text = self.input_box.get("1.0", "end-1c").strip()
         if not user_text or self.busy:
+            return
+        if self.current_session is None:
+            self._append(tr("msg_need_session"), "sys")
             return
         if self.speaker_id is None:
             self._append(tr("msg_need_engine"), "sys")
@@ -1920,12 +2033,16 @@ def main():
 
     # 切換語言時的重啟會帶 --lang 參數：此時不再詢問，直接套用該語言
     arg_lang = None
+    arg_chat_path = None
     for a in sys.argv[1:]:
         if a.startswith("--lang="):
             v = a.split("=", 1)[1].strip().lower()
             if v in CONVO_LANG_NAMES:
                 arg_lang = v
-            break
+        elif a.startswith("--chat="):
+            candidate = Path(a.split("=", 1)[1])
+            if candidate.exists() and candidate.is_file():
+                arg_chat_path = candidate
 
     # 啟動視窗本身先以預估語言（最新聊天紀錄的語言）呈現
     set_ui_lang(arg_lang or latest_chat_lang())
@@ -1945,7 +2062,7 @@ def main():
 
     set_ui_lang(chosen)
     root.deiconify()
-    app = VoiceChatApp(root)
+    app = VoiceChatApp(root, restore_path=arg_chat_path)
     root.mainloop()
 
 

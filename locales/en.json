@@ -42,6 +42,7 @@
   "msg_switched_lang": "[Language switched: {}; restarting to apply to UI and chat list]\n",
   "msg_ui_restart": "[Switching language; restarting…]\n",
   "msg_no_session_persona": "[No active chat; cannot apply persona]\n",
+  "msg_need_session": "[Create a chat first by clicking New Chat.]\n",
   "msg_persona_applied": "[Persona applied to \"{}\": {}]\n",
   "msg_persona_cleared": "[Cleared persona for \"{}\"; back to default]\n",
   "you_prefix": "You> ",
