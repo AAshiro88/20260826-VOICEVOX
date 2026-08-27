@@ -636,7 +636,10 @@ class VoiceChatApp:
     def __init__(self, root):
         self.root = root
         root.title(tr("app_title"))
-        root.geometry("800x640")
+        # 控制列較多，800x640 會讓多行輸入框看起來過於狹窄；每次啟動
+        # 直接使用較舒適的工作尺寸，同時防止視窗被縮得無法正常輸入。
+        root.geometry("1020x760")
+        root.minsize(900, 650)
 
         self.ui_queue = queue.Queue()
         self.history = []  # 目前對話的訊息列表（與 current_session["history"] 同一物件）
@@ -799,7 +802,7 @@ class VoiceChatApp:
         bottom.pack(fill="x")
 
         # 多行輸入區；Enter 送出、Shift+Enter 換行
-        self.input_box = tk.Text(bottom, height=4, font=("Microsoft JhengHei", 12))
+        self.input_box = tk.Text(bottom, height=6, font=("Microsoft JhengHei", 12))
         self.input_box.pack(side="left", fill="both", expand=True)
         self.input_box.bind("<Return>", self._on_return)
 
@@ -807,14 +810,18 @@ class VoiceChatApp:
         style.configure(
             "Big.TButton", font=("Microsoft JhengHei", 12, "bold"), padding=(16, 12)
         )
-        self.retry_btn = ttk.Button(
-            bottom, text=tr("btn_retry"), command=self.retry_last
-        )
-        self.retry_btn.pack(side="right", padx=(0, 4), anchor="se")
+        # 操作按鈕改為上下排列，保留輸入框的可用寬度。
+        action_buttons = ttk.Frame(bottom)
+        action_buttons.pack(side="right", fill="y", padx=(8, 0))
         self.send_button = ttk.Button(
-            bottom, text=tr("btn_send"), command=self.send_message, style="Big.TButton"
+            action_buttons, text=tr("btn_send"), command=self.send_message,
+            style="Big.TButton"
         )
-        self.send_button.pack(side="right", padx=(6, 0), anchor="se")
+        self.send_button.pack(fill="x", pady=(0, 4))
+        self.retry_btn = ttk.Button(
+            action_buttons, text=tr("btn_retry"), command=self.retry_last
+        )
+        self.retry_btn.pack(fill="x")
 
     def _clear_chat_display(self):
         """清空對話顯示區。"""
