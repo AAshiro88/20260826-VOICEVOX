@@ -2,17 +2,15 @@
 
 以本地語音合成（VOICEVOX）搭配大型語言模型（本機 Ollama 或 OpenRouter 雲端 API）的圖形介面對話程式。AI 回覆會自動朗讀，支援多重對話管理、角色設定，對話語言可選日本語／中文／English，介面文字亦提供三語切換。
 
-全部程式僅使用 **Python 標準庫**，不需安裝任何第三方套件（因此沒有 requirements.txt）。
+主程式使用 Python 標準庫，另使用 **deep-translator** 將非日文回覆翻成日文朗讀；相依套件列於 `requirements.txt`。
 
 ## 功能特色
 
 - **語音朗讀**：AI 回覆逐句送 VOICEVOX 合成並播放，可隨時停止；**雙擊任何一則有底線的朗讀句子可重新播放**；聲選擇採兩段式（角色→風格），偏好 3 個角色（猫使ビィ、小夜/SAYO、もち子さん）優先顯示
-- **AI 回覆統一 JSON 格式**：AI 必須輸出結構化 JSON（依語言模式動態欄位），前端依欄位拆出「對話顯示文字」與「朗讀用日文」，避免模型漏回答或漏欄位
+- **單語 LLM 回覆 + 本機翻譯流程**：模型只需以使用者選擇的語言回答純文字；中文／English 回覆會由 `deep-translator` 翻成日文供 VOICEVOX 朗讀，日語回覆則直接朗讀
 - **語言一鍵切換**：啟動時先彈出語言選擇視窗（日本語／中文／English，預設帶入**最新聊天紀錄的語言**）；每個對話綁定自己的語言，**對話清單只顯示相同語言的對話**；主畫面「語言」下拉切換後自動重啟套用
-  - 日本語：回覆為純日文單行（`{"jp": "..."}`），送模型、顯示與朗讀都用同一份原文，不需翻譯
-  - 中文：回覆為 `{"zh": "<繁體中文>", "jp": "<供 VOICEVOX 朗讀的日文>"}`；**送模型只送 `zh` 欄位，`jp` 不佔 token**
-  - English：回覆為 `{"en": "<English>", "jp": "<供 VOICEVOX 朗讀的日文>"}`；**送模型只送 `en` 欄位，`jp` 不佔 token**
-  - 朗讀一律使用 `jp` 欄位（VOICEVOX 只有日文發音正確）
+  - 日本語：模型回覆、顯示與朗讀都使用同一份日文原文，不需翻譯
+  - 中文／English：模型只回覆該語言；程式使用 `deep-translator` 翻譯成日文，日文譯文不會送回模型、不佔 LLM token
 - **雙來源 LLM**：一鍵切換本機 Ollama 或 OpenRouter（顯示全部模型，模型 Combobox 可編輯即時篩選關鍵字）
 - **多重對話管理**：每個對話存成獨立 JSON，可開新對話、載入、改名、刪除；記錄當下使用的聲音／服務／模型／語言，載入時自動還原
 - **自動命名**：新對話先以時間戳命名，第一則回覆後由 AI 自動取標題（標題語言跟隨對話語言），之後可手動改名；允許多個對話同名（清單自動加編號區分）
@@ -48,13 +46,13 @@
 
 ## 安裝
 
-不需安裝任何套件。確認已裝好 Python 與 VOICEVOX 即可：
+安裝 Python 相依套件，並確認 VOICEVOX 已啟動：
 
 ```bat
 pip install -r requirements.txt
 ```
 
-> 本專案無第三方相依套件，專案內未提供 requirements.txt，此步驟可略過。
+若使用 Anaconda，請以實際啟動程式的同一個 Python 執行上述指令，確保能找到 `deep-translator`。
 
 ## 事前準備
 
@@ -138,29 +136,29 @@ python ollama_voice_chat.py
   "persona": "傲嬌的妹妹",
   "history": [
     { "role": "user", "content": "你好" },
-    { "role": "assistant", "content": "{\"zh\": \"你好呀！\", \"jp\": \"やあ！\"}" },
+    { "role": "assistant", "content": "你好呀！", "voice": "やあ！" },
     { "role": "system", "content": "以下是更早對話的重點摘要：..." }
   ]
 }
 ```
 
-`history` 中 role 為 system 的項目是自動摘要產物，載入重播時不顯示。`persona` 是該對話專屬的角色設定，載入時自動還原到介面輸入框。`lang` 是該對話綁定的語言（`ja`／`zh`／`en`），同時決定它在對話清單中的歸屬——**清單只顯示目前語言的對話**；舊檔案沒有此欄位時視為 `zh`，不需遷移。
+`history` 中 role 為 system 的項目是自動摘要產物，載入重播時不顯示。assistant 的 `content` 永遠是模型以使用者語言回答的單語文字；非日語對話的 `voice` 則是 `deep-translator` 產生的日文朗讀稿，**不會送回 LLM**。`persona` 是該對話專屬的角色設定，載入時自動還原到介面輸入框。`lang` 是該對話綁定的語言（`ja`／`zh`／`en`），同時決定它在對話清單中的歸屬——**清單只顯示目前語言的對話**；舊檔案沒有此欄位時視為 `zh`，不需遷移。
 
-> 舊版對話以 `日:`／`中:`／`英:` 純文字前綴儲存 assistant 內容；本版本**只支援新 JSON 格式**，舊對話載入時若 assistant 內容不是合法 JSON，相關訊息會顯示為空，可按「重新生成」重來。
+> 舊版 assistant JSON（含 `zh`／`en`／`jp` 欄位）仍可正常載入、顯示與重播；新回覆會在下次存檔時使用單語 `content` 與獨立 `voice` 欄位。更早的 `日:`／`中:`／`英:` 前綴格式則視為一般文字，建議重新生成以取得正確朗讀稿。
 
 各語言的回覆格式：
 
-| 語言 | AI 必須輸出的 JSON | 送模型的 assistant 內容 | 朗讀 |
-|------|-------------------|------------------------|------|
-| `ja` | `{"jp": "..."}` | 整個 `jp` 欄位 | `jp` 欄位（VOICEVOX 合成） |
-| `zh` | `{"zh": "...", "jp": "..."}` | 只送 `zh` 欄位 | 取 `jp` 欄位；無 `jp` 時跳過朗讀 |
-| `en` | `{"en": "...", "jp": "..."}` | 只送 `en` 欄位 | 取 `jp` 欄位；無 `jp` 時跳過朗讀 |
+| 語言 | LLM 輸出 | 送模型的 assistant 歷史 | 朗讀 |
+|------|----------|----------------------------|------|
+| `ja` | 純日文 | 日文原文 | 日文原文（VOICEVOX 合成） |
+| `zh` | 純繁體中文 | 中文原文 | `deep-translator` 翻成日文 |
+| `en` | 純 English | English 原文 | `deep-translator` 翻成日文 |
 
-`llm_view()` 送模型時只取對話語言欄位，`jp` 朗讀欄位不佔 token。`reply_parts()` 把回覆拆成「顯示文字」與「朗讀文字」。
+`llm_view()` 送模型時只保留 `content`，不會送出 `voice` 日文朗讀稿；`reply_parts()` 同時相容讀取新單語格式與舊 JSON 格式。
 
 ## 程式架構
 
-`AI_voice_chat_ui.py`（約 1880 行）是單一檔案的純標準庫程式，主要區塊如下：
+`AI_voice_chat_ui.py` 是單一檔案程式，使用 Python 標準庫加上 `deep-translator`，主要區塊如下：
 
 ```text
 AI_voice_chat_ui.py
@@ -170,8 +168,8 @@ AI_voice_chat_ui.py
 │                    （自 locales/{zh,ja,en}.json 動態載入，缺漏退回繁體中文）
 ├─ 語言與提示詞      CONVO_LANGS / SYSTEM_PROMPTS / SUMMARY_ASKS / SUMMARY_HEADERS / TITLE_ASKS
 ├─ HTTP 輔助         http_json() / post_json()（urllib 標準庫）
-├─ 回覆解析          _extract_json() / reply_parts() / assistant_conv_text() / llm_view()
-│                    detect_lang()
+├─ 回覆與翻譯        reply_parts() / assistant_conv_text() / llm_view()
+│                    translate_to_japanese()（deep-translator）
 ├─ 其他純函式        split_sentences() / sanitize_filename() / clean_title()
 │                    new_chat_filename() / scan_chat_files()
 ├─ PREFERRED_SPEAKERS / _PERSONA_TEMPLATE
@@ -217,8 +215,9 @@ AI_voice_chat_ui.py
   → 背景執行緒 chat_worker()
       → 歷史過長先 maybe_summarize()（壓縮舊訊息）
       → call_llm() 呼叫 Ollama 或 OpenRouter
-      → 原始回覆存入 history → write_session_file() 存檔
-      → _extract_json() + reply_parts() 拆成（顯示文字, 朗讀文字）
+      → 回覆以使用者語言存入 history
+      → 中文／English 經 deep-translator 轉為日文 voice（日本語則直接使用原文）
+      → write_session_file() 存檔
       → _emit("ai_msg", conv, voice) 更新畫面
       → speak(voice) 逐句送往 VOICEVOX 合成並播放
 ```
@@ -226,9 +225,9 @@ AI_voice_chat_ui.py
 ### 語言與回覆格式
 
 - 對話語言 `lang`（`ja`/`zh`/`en`）綁定在各對話檔。
-- AI 回覆一律為 JSON 格式，欄位依語言動態決定（`ja` 只輸出 `jp`；`zh`/`en` 輸出對話語言 + `jp`）。
-- `llm_view()` 送模型時只取對話語言欄位，`jp` 朗讀欄位不佔 token。
-- `reply_parts()` 從 JSON 拆出「顯示文字」與「朗讀文字」。
+- AI 回覆一律是使用者選定語言的純文字；模型不負責產生日文翻譯。
+- `llm_view()` 只傳遞 `content`，獨立的 `voice` 日文朗讀稿不佔 token。
+- `translate_to_japanese()` 只在中文／English 回覆後呼叫；日文對話跳過翻譯。
 
 ### 重新生成邏輯（retry_last）
 
@@ -247,7 +246,7 @@ AI_voice_chat_ui.py
 | `HTTP Error 405` | `/audio_query` 必須用 POST（現行程式碼已正確處理） |
 | OpenRouter `HTTP Error 429` | 免費模型有頻率限制，稍候再試或換一個模型 |
 | 找不到偏好的 3 個聲音 | VOICEVOX 版本未含這些角色，請更新或改用其他聲音測試 |
-| 中文／英文朗讀發音怪怪的 | AI 回覆缺少 `jp` 欄位時不會送 VOICEVOX（避免硬唸中文產生怪音）；可按「重新生成」重來一次 |
+| 中文／英文沒有朗讀 | `deep-translator` 未安裝、網路無法連至翻譯服務，或翻譯服務暫時失敗；確認 `pip install -r requirements.txt` 已在啟動程式的 Python 環境執行，之後可按「重新生成」重試 |
 | 對話出現「整理歷史中」 | 歷史超過 5000 字元觸發自動摘要，完成前無法送出新訊息 |
 | 切換語言沒有生效 | 「語言」下拉切換會自動重啟並直接套用（跳過啟動選單）；啟動時也可在語言視窗重新選擇 |
 | 對話清單找不到某個對話 | 該對話綁定的是其他語言；把「語言」下拉切到該語言即會出現（舊檔案視為中文） |

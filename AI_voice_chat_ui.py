@@ -6,9 +6,10 @@
 - 下拉選單只列出偏好的 3 個聲音：猫使ビィ、小夜/SAYO、もち子さん
 - 可切換對話來源：本機 Ollama 或 OpenRouter 免費模型（金鑰放在同目錄 .env）
 - 對話語言可選日本語／中文／English：
-  * 日本語：回覆為純日文，送模型、顯示與朗讀都用同一份原文，不需翻譯
-  * 中文／English：回覆含「日:」行供 VOICEVOX 合成，送模型只送該語言行（省 token）
-  * 朗讀一律使用日文行（VOICEVOX 只有日文發音正確）
+  * 大型語言模型一律只用「使用者選擇的語言」回覆一種語言，不再要求模型自行輸出日文
+  * 日本語模式：模型回覆本身就是朗讀用文字，不需翻譯
+  * 中文／English 模式：一律呼叫 deep-translator 套件把模型回覆即時翻譯成日文，供 VOICEVOX 朗讀
+  * 朗讀一律使用日文（VOICEVOX 只有日文發音正確）
 - 語言於啟動時選擇（預設帶入最新聊天紀錄的語言），每個對話綁定各自語言，
   對話清單只顯示目前語言的對話；主畫面「語言」下拉切換後自動重啟套用
 - 多重對話管理：每個對話存成 chats/ 下獨立 JSON（含當時聲音、服務、模型與語言），
@@ -20,7 +21,8 @@
 - 歷史過長時自動呼叫目前模型整理成摘要（整理中禁止送出新訊息）
 - AI 回覆逐句合成播放，可中途停止朗讀；雙擊朗讀句子（底線行）可重新播放
 
-僅使用 Python 標準庫，不需安裝第三方套件。
+本程式主體僅使用 Python 標準庫；朗讀翻譯功能需安裝第三方套件 deep-translator：
+    pip install deep-translator
 用法：python AI_voice_chat_ui.py
 """
 
@@ -40,6 +42,13 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, simpledialog, ttk
 import winsound
+
+# 第三方套件：將對話語言的回覆翻譯成日文，供 VOICEVOX 朗讀。
+# 延後報錯可讓使用者在尚未安裝套件時仍能開啟程式並閱讀安裝提示。
+try:
+    from deep_translator import GoogleTranslator
+except ImportError:
+    GoogleTranslator = None
 
 ENGINE_URL = "http://127.0.0.1:50021"
 OLLAMA_URL = "http://127.0.0.1:11434"
@@ -286,7 +295,8 @@ CONVO_LANGS = [
 DEFAULT_CONVO_LANG = "zh"
 CONVO_LANG_NAMES = dict(CONVO_LANGS)
 
-# 各對話語言的系統提示
+# 各對話語言的系統提示：模型一律只需用對話語言輸出純文字，
+# 不再要求輸出 JSON 或自行附上日文翻譯；日文朗讀用文字改由 deep-translator 翻譯取得
 SYSTEM_PROMPTS = {
     "ja": (
         "あなたはVOICEVOX音声合成を通してユーザーと会話する仲間です。"
@@ -294,20 +304,19 @@ SYSTEM_PROMPTS = {
         "Markdown・絵文字・箇条書きは使わず、短く会話調で返してください。"
     ),
     "zh": (
-        "你是透過 VOICEVOX 語音合成與使用者對話的夥伴。VOICEVOX 只能朗讀日文，"
-        "所以你的每一次回覆都必須嚴格輸出 JSON 格式，鍵名為：\n"
+        "你是與使用者對話的夥伴。每次回覆請只使用繁體中文的自然口語句子，"
+        "不要使用 Markdown、表情符號或條列式，回覆保持簡短、口語化。"
+    ),
+    "_zh_old_removed": (
+        "原本要求 JSON 的講法已不再使用，保留註釋作為參考：鍵名為：\n"
         "{\"zh\": \"<前述日文的繁體中文翻譯>\", \"jp\": \"<自然口語的日文回覆，將被朗讀>\"}\n"
         "不要使用 Markdown、表情符號或條列式，回覆保持簡短、口語化。\n"
         "注意：對話紀錄中你過去的回覆只會顯示中文譯文，但你每次的新回覆仍必須使用上述 JSON 格式。"
     ),
     "en": (
-        "You are a companion chatting with the user through VOICEVOX speech synthesis. "
-        "VOICEVOX can only read Japanese aloud, so every reply MUST strictly follow "
-        "this JSON format with no other content:\n"
-        "{\"en\": \"<your reply in natural spoken English>\", \"jp\": \"<a natural spoken Japanese version of the above, to be read aloud>\"}\n"
-        "Do not use Markdown, emoji, or bullet lists. Keep replies short and conversational.\n"
-        "Note: your past replies in the history show only the English line, "
-        "but each new reply must still use the JSON format above."
+        "You are a companion chatting with the user. Reply only in natural, spoken "
+        "English. Do not use Markdown, emoji, or bullet lists. Keep replies short "
+        "and conversational."
     ),
 }
 
@@ -427,20 +436,23 @@ def _extract_prefixed(text):
     return {}, None
 
 
-def reply_parts(text, lang):
-    """依對話語言從 JSON 回覆拆解，回傳（對話用文字, 朗讀用文字）。
+def reply_parts(text, lang, saved_voice=None):
+    """回傳（顯示文字, 日文朗讀文字）。
 
-    - 日本語模式：只取 jp 欄位
-    - 中文／English 模式：取對應語言欄位 + jp (日文朗讀) 欄位
+    新版回覆是單一純文字；日文朗讀文字另存於 assistant 訊息的 ``voice``
+    欄位，因此不會再送回 LLM。仍可讀取舊版 JSON 對話紀錄。
     """
     text = text.strip()
     parts, fallback = _extract_json(text)
-    if lang == "ja":
-        conv = parts.get("jp") or ("" if not parts else str(list(parts.values())[0]))
-    else:
-        # zh 或 en 模式：優先取對應語言，其次 jp (日文供 VOICEVOX 朗讀)
-        conv = parts.get(lang) or parts.get("jp") or ("" if not parts else str(list(parts.values())[0]))
-    voice = parts.get("jp") or ("" if not parts else "")
+    if parts:  # 舊版 JSON 格式相容
+        if lang == "ja":
+            conv = parts.get("jp") or str(next(iter(parts.values())))
+        else:
+            conv = parts.get(lang) or parts.get("zh") or parts.get("en") or str(next(iter(parts.values())))
+        voice = saved_voice or parts.get("jp") or (conv if lang == "ja" else "")
+        return conv, voice
+    conv = text
+    voice = saved_voice or (conv if lang == "ja" else "")
     return conv, voice
 
 
@@ -450,12 +462,58 @@ def assistant_conv_text(content, lang):
     目前語言的欄位不存在時（例如中途切換過語言），改取其他非日文欄位，
     最後才退回原文，確保不會整段雙語重送。
     """
-    content = content.strip()
-    parts, fallback = _extract_json(content)
-    if lang == "ja":
-        return parts.get("jp") or fallback or content
-    conv = parts.get(lang) or parts.get("zh") or parts.get("en")
-    return conv or fallback or content
+    conv, _ = reply_parts(content, lang)
+    return conv
+
+
+def translate_to_japanese(text, lang):
+    """以 deep-translator 把中文或英文回覆轉成供 VOICEVOX 朗讀的日文。"""
+    text = (text or "").strip()
+    if not text or lang == "ja":
+        return text
+    if GoogleTranslator is None:
+        raise RuntimeError("找不到 deep-translator；請執行 pip install -r requirements.txt")
+    source = {"zh": "zh-TW", "en": "en"}.get(lang, "auto")
+    translated = GoogleTranslator(source=source, target="ja").translate(text)
+    if not translated or not translated.strip():
+        raise RuntimeError("deep-translator 未傳回日文翻譯")
+    return translated.strip()
+
+
+def migrate_assistant_voices(history, lang):
+    """將舊對話紀錄遷移為單語 content 加獨立 voice 欄位。
+
+    早期紀錄把模型自行產生的 jp 與回覆文字一起塞在 JSON ``content``。
+    載入這類紀錄時，非日語回覆會重新交由 deep-translator 翻成日文，
+    不沿用舊的 jp 欄位，確保朗讀稿的來源一致。
+
+    回傳 ``(changed, errors)``；個別翻譯失敗時保留原紀錄，避免遺失對話。
+    """
+    changed = False
+    errors = []
+    for message in history:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = str(message.get("content", ""))
+        conv, _old_voice = reply_parts(content, lang, message.get("voice"))
+        # 已有 voice 的新格式不需要再次呼叫翻譯服務。
+        if message.get("voice"):
+            if content != conv:
+                message["content"] = conv
+                changed = True
+            continue
+        if not conv:
+            continue
+        try:
+            voice = translate_to_japanese(conv, lang)
+        except Exception as e:
+            errors.append(str(e))
+            continue
+        if message.get("content") != conv or message.get("voice") != voice:
+            message["content"] = conv
+            message["voice"] = voice
+            changed = True
+    return changed, errors
 
 
 def llm_view(history, lang):
@@ -1186,6 +1244,12 @@ class VoiceChatApp:
         self.current_path = Path(path_str)
         self.history = session["history"]
 
+        # 將舊版 assistant JSON 轉成新版單語 content + voice。這也讓舊對話
+        # 的日文朗讀稿確實由 deep-translator 產生，而非沿用模型附帶的 jp。
+        migrated, migration_errors = migrate_assistant_voices(
+            self.history, session["lang"]
+        )
+
         self._clear_chat_display()
 
         # 還原角色設定到輸入框與記憶體
@@ -1215,7 +1279,9 @@ class VoiceChatApp:
         sid = session["speaker_id"]
         if isinstance(sid, int):
             # 從完整清單反查對應的 (speaker_name, style_name)
-            for name, (_uuid, styles) in getattr(self, "all_voices", []):
+            # all_voices 的每筆資料是 (speaker_name, speaker_uuid, styles)，
+            # 要解開三個元素；此前誤當成兩元素，載入既有對話時會崩潰。
+            for name, _uuid, styles in getattr(self, "all_voices", []):
                 for s_name, s_id in styles:
                     if s_id == sid:
                         # 確認目前篩選下此角色是否可見
@@ -1236,6 +1302,11 @@ class VoiceChatApp:
             if sid is not None:
                 speaker_note = tr("msg_voice_missing").format(sid)
 
+        # 等 provider、模型、語言、角色與聲音都已還原後再寫檔，避免遷移
+        # 意外以啟動中的預設值覆蓋該對話原本的設定。
+        if migrated:
+            self.write_session_file()
+
         # 重播歷史（不朗讀）；摘要用的 system 訊息不顯示
         shown = 0
         for m in history:
@@ -1247,12 +1318,17 @@ class VoiceChatApp:
                 self._append(f"{tr('you_prefix')}{content}\n", "user")
                 shown += 1
             elif role == "assistant":
-                conv, voice = reply_parts(content, session["lang"])
+                conv, voice = reply_parts(content, session["lang"], m.get("voice"))
                 # 註冊成可雙擊重播的訊息（只顯示不朗讀）
                 self._register_ai_message(conv, voice)
                 shown += 1
 
         self._append(tr("msg_loaded").format(session["name"], shown), "sys")
+        if migration_errors:
+            self._append(
+                "[部分舊回覆翻譯失敗，保留原始紀錄] " + migration_errors[0] + "\n",
+                "sys",
+            )
         if self.persona:
             self._append(tr("msg_persona_restored").format(self.persona), "sys")
         if speaker_note:
@@ -1580,7 +1656,7 @@ class VoiceChatApp:
             if m.get("role") == "user":
                 self._append(f"{tr('you_prefix')}{m['content']}\n", "user")
             elif m.get("role") == "assistant":
-                conv, voice = reply_parts(m["content"], self.convo_lang)
+                conv, voice = reply_parts(m["content"], self.convo_lang, m.get("voice"))
                 self._register_ai_message(conv, voice)
         self._append(tr("msg_retrying"), "sys")
         self._emit("busy", True)
@@ -1729,11 +1805,19 @@ class VoiceChatApp:
             self._emit("busy", False)
             return
 
-        # 不再補前綴；直接以 JSON 解析。原始回覆原封不動存進歷史。
-        self.history.append({"role": "assistant", "content": reply})
+        # 模型回覆只保留使用者語言；日文朗讀稿獨立存放，永不送回模型。
+        conv, legacy_voice = reply_parts(reply, self.convo_lang)
+        try:
+            voice = legacy_voice or translate_to_japanese(conv, self.convo_lang)
+        except Exception as e:
+            # 翻譯服務失敗不能讓整個對話消失；保留文字回覆並略過朗讀。
+            voice = ""
+            self._emit("text", f"[翻譯失敗，略過朗讀] {e}\n", "sys")
+        assistant_message = {"role": "assistant", "content": conv}
+        if voice:
+            assistant_message["voice"] = voice
+        self.history.append(assistant_message)
         self.write_session_file()
-
-        conv, voice = reply_parts(reply, self.convo_lang)
         self._emit("ai_msg", conv, voice)
 
         self.speak(voice)
