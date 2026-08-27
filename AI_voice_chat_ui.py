@@ -655,11 +655,11 @@ class VoiceChatApp:
 
         # 聲音選擇：兩段式（角色 → 風格）+ 偏好角色篩選 checkbox
         ttk.Label(mid, text=tr("lbl_voice")).pack(side="left")
-        self.speaker_box = ttk.Combobox(mid, state="readonly", width=18)
+        self.speaker_box = ttk.Combobox(mid, state="readonly", width=14)
         self.speaker_box.pack(side="left", padx=(4, 2))
         self.speaker_box.bind("<<ComboboxSelected>>", self.on_speaker_selected)
         ttk.Label(mid, text=tr("lbl_voice_style")).pack(side="left")
-        self.style_box = ttk.Combobox(mid, state="readonly", width=18)
+        self.style_box = ttk.Combobox(mid, state="readonly", width=14)
         self.style_box.pack(side="left", padx=(2, 4))
         self.style_box.bind("<<ComboboxSelected>>", self.on_voice_style_selected)
         # 偏好角色篩選（預設勾選＝只顯示 PREFERRED_SPEAKERS 的角色）
@@ -670,31 +670,32 @@ class VoiceChatApp:
         ).pack(side="left", padx=(0, 8))
         self.show_only_preferred = True  # 供 _apply_voice_filter 內部判斷用
 
-        # 模型選擇：可編輯 combobox + 即時文字篩選
-        ttk.Label(mid, text=tr("lbl_model")).pack(side="left")
-        self.model_box = ttk.Combobox(mid, width=22)
+        # 模型選擇：可編輯 combobox + 即時文字篩選（獨立一列避免擠壓）
+        mid2 = ttk.Frame(self.root, padding=(6, 2))
+        mid2.pack(fill="x")
+        ttk.Label(mid2, text=tr("lbl_model")).pack(side="left")
+        self.model_box = ttk.Combobox(mid2, width=30)
         self.model_box.pack(side="left", padx=(4, 4))
         self.model_box.bind("<<ComboboxSelected>>", self.on_model_selected)
         self.model_box.bind("<KeyRelease>", self._on_model_filter)
         # 目前模型完整列表（用於篩選）
         self._all_model_list = []
-        ttk.Label(mid, text=tr("lbl_model_filter_hint")).pack(side="left")
-        self.model_filter_entry = ttk.Entry(mid, width=12, font=("Microsoft JhengHei", 9))
+        ttk.Label(mid2, text=tr("lbl_model_filter_hint")).pack(side="left")
+        self.model_filter_entry = ttk.Entry(mid2, width=20, font=("Microsoft JhengHei", 9))
         self.model_filter_entry.pack(side="left", padx=(2, 4))
         self.model_filter_entry.bind("<KeyRelease>", self._on_model_filter_entry)
         self.model_filter_entry.bind("<Return>", lambda e: self.model_box.focus())
 
-        # 語言：同時決定 AI 回覆語言與介面文字語言（介面變更時自動重啟套用）
-        ttk.Label(mid, text=tr("lbl_lang")).pack(side="left")
+        ttk.Label(mid2, text=tr("lbl_lang")).pack(side="left", padx=(12, 0))
         self.lang_box = ttk.Combobox(
-            mid, state="readonly", width=10,
+            mid2, state="readonly", width=10,
             values=[name for _, name in CONVO_LANGS],
         )
         self.lang_box.set(CONVO_LANG_NAMES[self.convo_lang])
         self.lang_box.pack(side="left", padx=(4, 0))
         self.lang_box.bind("<<ComboboxSelected>>", self.on_lang_selected)
 
-        ttk.Button(mid, text=tr("btn_stop"), command=lambda: self.stop_speaking()).pack(
+        ttk.Button(mid2, text=tr("btn_stop"), command=lambda: self.stop_speaking()).pack(
             side="right", padx=4
         )
 
@@ -703,8 +704,8 @@ class VoiceChatApp:
         prow.pack(fill="x")
 
         ttk.Label(prow, text=tr("lbl_persona")).pack(side="left")
-        self.persona_entry = ttk.Entry(prow, font=("Microsoft JhengHei", 11))
-        self.persona_entry.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        self.persona_entry = ttk.Entry(prow, width=18, font=("Microsoft JhengHei", 11))
+        self.persona_entry.pack(side="left", padx=(4, 4))
         self.persona_entry.bind("<Return>", lambda e: self.apply_persona())
         ttk.Button(prow, text=tr("btn_edit_persona"), command=self.open_persona_editor).pack(
             side="left", padx=(0, 4)
