@@ -154,6 +154,84 @@ python ollama_voice_chat.py
 
 AI 回覆缺少前綴時，程式自動偵測語言並補上標籤。朗讀一律取「日:」行（`ja` 模式為原文本身）；若回覆只有中文行（無日文翻譯），則不送 VOICEVOX（避免硬唸中文產生怪音）。
 
+## 程式架構
+
+`AI_voice_chat_ui.py`（約 1860 行）是單一檔案的純標準庫程式，主要區塊如下：
+
+```text
+AI_voice_chat_ui.py
+├─ 環境與路徑        ENGINE_URL / OLLAMA_URL / OPENROUTER_URL / ENV_PATH / CHATS_DIR
+├─ .env 載入         load_env() → OPENROUTER_API_KEY（金鑰存於記憶體，不寫入輸出）
+├─ 三語文字表        TR_TEXTS（zh/ja/en 各 100+ 鍵）+ set_ui_lang() + tr()
+├─ 語言與提示詞      CONVO_LANGS / SYSTEM_PROMPTS / SUMMARY_ASKS / SUMMARY_HEADERS / TITLE_ASKS
+├─ HTTP 輔助         http_json() / post_json()（urllib 標準庫）
+├─ 回覆解析          detect_lang() / ensure_lang_prefix() / _extract_prefixed()
+│                    reply_parts() / assistant_conv_text() / llm_view()
+├─ 其他純函式        split_sentences() / sanitize_filename() / clean_title()
+│                    new_chat_filename() / scan_chat_files()
+├─ class VoiceChatApp（Tkinter 主程式）
+│   ├─ UI 建置        _build_widgets() / _clear_chat_display() / _append() / _register_ai_message()
+│   ├─ 佇列輪詢       _poll_queue() / _emit()（背景執行緒 → 主執行緒更新畫面）
+│   ├─ 後端初始化     init_backend() / _collect_voices() / _load_voices() / _apply_models()
+│   ├─ 事件處理       on_provider_selected() / on_voice_selected() / on_lang_selected() / on_model_selected()
+│   ├─ 對話管理       new_session() / load_selected_session() / rename / delete
+│   │                 handle_restore() / write_session_file() / refresh_session_list()
+│   ├─ 角色設定       apply_persona() / build_system_prompt()
+│   ├─ 訊息流程       send_message() / _on_return() / retry_last() / chat_worker()
+│   ├─ 後台工作       call_llm() / maybe_summarize() / auto_title_worker() / speak()
+│   └─ 停止與重播     stop_speaking() / replay_message()
+└─ main() + 啟動錯誤記錄（startup_error.log）
+```
+
+### 執行緒模型
+
+- **主執行緒**：Tkinter 事件迴圈，並以 `_poll_queue()` 每 100ms 輪詢 `ui_queue`。
+- **背景執行緒**：`chat_worker()`、`speak()`、`init_backend()`、`auto_title_worker()`、`maybe_summarize()` 都在工作執行緒執行。
+- **關鍵規則**：背景執行緒不直接操作 Tk 元件，一律透過 `self._emit()` 把訊息塞進 `ui_queue`，由主執行緒的 `_poll_queue()` 依型別處理，避免跨執行緒 UI 存取造成的競態與崩潰。
+
+### 佇列訊息型別（ui_queue）
+
+| 型別 | 內容 |
+|------|------|
+| `text` | `(文字, tag)` 附加到對話區 |
+| `ai_msg` | `(conv, voice)` 顯示一則 AI 回覆（含朗讀） |
+| `busy` | `(bool)` 切換忙碌鎖與按鈕可用狀態 |
+| `engine_ok/ng`、`ollama_ok/ng`、`or_ok/ng` | 狀態列紅綠燈 |
+| `voices`、`ollama_models`、`or_models` | 載入聲音／模型清單 |
+| `sessions` | 更新對話清單下拉 |
+| `restore` | 還原一個對話工作階段 |
+
+### 資料流程
+
+```
+使用者在輸入框送出訊息（send_message）
+  → 背景執行緒 chat_worker()
+      → 歷史過長先 maybe_summarize()（壓縮舊訊息）
+      → call_llm() 呼叫 Ollama 或 OpenRouter
+      → ensure_lang_prefix() 補上語言前綴
+      → 存入 history → write_session_file() 存檔
+      → reply_parts() 拆成（顯示文字, 朗讀文字）
+      → _emit("ai_msg", conv, voice) 更新畫面
+      → speak(voice) 逐句送往 VOICEVOX 合成並播放
+```
+
+### 語言與回覆格式
+
+- 對話語言 `lang`（`ja`/`zh`/`en`）綁定在各對話檔。
+- 回覆格式：`日:`（朗讀）、`中:`／`英:`（對話）。
+- `llm_view()` 送模型時只取對話語言行，日文朗讀行不佔 token。
+- `reply_parts()` 把回覆拆成「顯示文字」與「朗讀文字」。
+- `ensure_lang_prefix()`＋`detect_lang()`：回覆缺少前綴時自動偵測並補上；無日文行則不朗讀。
+
+### 重新生成邏輯（retry_last）
+
+依歷史最後一則的角色分兩路：
+
+- **最後是 `user`**（上次呼叫失敗）：`chat_worker()` 失敗時不會移除 user 訊息，因此直接重送即可，不需刪除任何內容。
+- **最後是 `assistant`**（對回覆不滿意）：移除該 assistant 回覆，重送其後的 user 訊息。
+
+`chat_worker()` 透過 `append_user` 參數避免重新生成時重複加入 user 訊息。
+
 ## 常見問題
 
 | 現象 | 原因與處理 |
