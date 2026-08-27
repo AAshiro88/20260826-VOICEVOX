@@ -250,6 +250,25 @@ PREFERRED_OPENROUTER_MODELS = ["ox-alpha", "gemini", "gpt", "claude"]
 # 顯示所有 OpenRouter 模型（不限制免費）
 OPENROUTER_KEEP_FREE_ONLY = False
 
+# 角色 persona 編輯範本（點「範本」鈕時自動填入）
+_PERSONA_TEMPLATE = """你現在必須完全扮演使用者的「{role}」。
+- 年齡/外貌：{appearance}
+- 關係：{relationship}
+- 說話習慣：
+  1. 句尾會加上「{suffix}」。
+  2. 稱呼使用者為「{address}」。
+  3. 自稱「{self}」。
+  4. 典型傲嬌：先否定、吐槽，接著默默把事情做好。
+
+[行為準則]
+- 態度：{attitude}（例如：80% 傲、20% 嬌）。
+- 肢體動作說明：使用括號描繪貓咪動作與表情（如 *(動動耳朵)*）。
+- 嚴格禁止：脫離角色、承認自己是 AI、冰冷機械化語句。
+
+[對話範例]
+使用者：「{example_question}」
+角色：「{example_answer}」"""
+
 # 歷史長度上限（字元數），超過就自動整理成摘要
 HISTORY_CHAR_LIMIT = 5000
 # 整理時保留最近的訊息則數（原文），其餘壓縮為摘要
@@ -589,6 +608,14 @@ class VoiceChatApp:
         # 角色設定：屬於各對話工作階段，存取皆透過 current_session["persona"]
         self.persona = ""
 
+        # 聲音/模型篩選旗標（啟動預設）
+        self.show_only_preferred = True   # 角色：只顯示偏好 3 個
+        self.show_only_free = True        # OpenRouter 模型：只顯示 :free / ox-alpha
+        self.speaker_map = {}             # 角色名稱 → (uuid, [(style_name, style_id), ...])
+        self.style_map = {}               # styleId → (speaker_name, style_name)
+        self.all_voices = []              # 完整角色清單（未篩選）
+        self._all_model_list = []         # 完整模型清單（未篩選）
+
         self._build_widgets()
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -626,15 +653,36 @@ class VoiceChatApp:
         self.provider_box.pack(side="left", padx=(4, 16))
         self.provider_box.bind("<<ComboboxSelected>>", self.on_provider_selected)
 
+        # 聲音選擇：兩段式（角色 → 風格）+ 偏好角色篩選 checkbox
         ttk.Label(mid, text=tr("lbl_voice")).pack(side="left")
-        self.voice_box = ttk.Combobox(mid, state="readonly", width=30)
-        self.voice_box.pack(side="left", padx=(4, 16))
-        self.voice_box.bind("<<ComboboxSelected>>", self.on_voice_selected)
+        self.speaker_box = ttk.Combobox(mid, state="readonly", width=18)
+        self.speaker_box.pack(side="left", padx=(4, 2))
+        self.speaker_box.bind("<<ComboboxSelected>>", self.on_speaker_selected)
+        ttk.Label(mid, text=tr("lbl_voice_style")).pack(side="left")
+        self.style_box = ttk.Combobox(mid, state="readonly", width=18)
+        self.style_box.pack(side="left", padx=(2, 4))
+        self.style_box.bind("<<ComboboxSelected>>", self.on_voice_style_selected)
+        # 偏好角色篩選（預設勾選＝只顯示 PREFERRED_SPEAKERS 的角色）
+        self.filter_voices_var = tk.BooleanVar(value=True)
+        self.filter_voices_var.trace_add("write", lambda *_: self.on_toggle_preferred_voices())
+        ttk.Checkbutton(
+            mid, text=tr("btn_filter_preferred"), variable=self.filter_voices_var
+        ).pack(side="left", padx=(0, 8))
+        self.show_only_preferred = True  # 供 _apply_voice_filter 內部判斷用
 
+        # 模型選擇：可編輯 combobox + 即時文字篩選
         ttk.Label(mid, text=tr("lbl_model")).pack(side="left")
         self.model_box = ttk.Combobox(mid, width=22)
-        self.model_box.pack(side="left", padx=(4, 12))
+        self.model_box.pack(side="left", padx=(4, 4))
         self.model_box.bind("<<ComboboxSelected>>", self.on_model_selected)
+        self.model_box.bind("<KeyRelease>", self._on_model_filter)
+        # 目前模型完整列表（用於篩選）
+        self._all_model_list = []
+        ttk.Label(mid, text=tr("lbl_model_filter_hint")).pack(side="left")
+        self.model_filter_entry = ttk.Entry(mid, width=12, font=("Microsoft JhengHei", 9))
+        self.model_filter_entry.pack(side="left", padx=(2, 4))
+        self.model_filter_entry.bind("<KeyRelease>", self._on_model_filter_entry)
+        self.model_filter_entry.bind("<Return>", lambda e: self.model_box.focus())
 
         # 語言：同時決定 AI 回覆語言與介面文字語言（介面變更時自動重啟套用）
         ttk.Label(mid, text=tr("lbl_lang")).pack(side="left")
@@ -650,14 +698,17 @@ class VoiceChatApp:
             side="right", padx=4
         )
 
-        # 角色設定列
+        # 角色設定列：單行 Entry + 編輯對話框按鈕 + 套用按鈕
         prow = ttk.Frame(self.root, padding=(6, 4))
         prow.pack(fill="x")
 
         ttk.Label(prow, text=tr("lbl_persona")).pack(side="left")
         self.persona_entry = ttk.Entry(prow, font=("Microsoft JhengHei", 11))
-        self.persona_entry.pack(side="left", fill="x", expand=True, padx=(4, 6))
+        self.persona_entry.pack(side="left", fill="x", expand=True, padx=(4, 4))
         self.persona_entry.bind("<Return>", lambda e: self.apply_persona())
+        ttk.Button(prow, text=tr("btn_edit_persona"), command=self.open_persona_editor).pack(
+            side="left", padx=(0, 4)
+        )
         ttk.Button(prow, text=tr("btn_apply_persona"), command=self.apply_persona).pack(side="left")
 
         # 對話管理列
@@ -888,46 +939,143 @@ class VoiceChatApp:
         self._emit("restore", latest[0] if latest else None, latest[1] if latest else None)
 
     def _collect_voices(self, speakers):
-        """組出聲音選項，只保留符合偏好關鍵字的 3 個聲音。"""
-        voices = []
+        """組出角色清單，每個角色含其風格子清單。
+
+        回傳結構：[(speaker_name, speaker_uuid, [(style_name, style_id), ...]), ...]
+        仍依 PREFERRED_SPEAKERS 排序（偏好角色在前），未命中的角色接在後面。
+        """
+        results = []
         for speaker in speakers:
             name = speaker.get("name", "")
-            if not any(
-                alias.lower() in name.lower()
-                for _, aliases in PREFERRED_SPEAKERS
-                for alias in aliases
-            ):
+            uuid = speaker.get("speaker_uuid", "")
+            styles = [
+                (style.get("name", ""), style["id"])
+                for style in speaker.get("styles", [])
+                if "id" in style
+            ]
+            if not styles:
                 continue
-            for style in speaker.get("styles", []):
-                label = f"{name}（{style.get('name', '')}）[styleId={style['id']}]"
-                voices.append((label, style["id"]))
-        return voices
+            results.append((name, uuid, styles))
+        # 偏好角色排前面（依 PREFERRED_SPEAKERS 順序）
+        def sort_key(item):
+            name = item[0]
+            for idx, (_, aliases) in enumerate(PREFERRED_SPEAKERS):
+                if any(alias.lower() in name.lower() for alias in aliases):
+                    return (0, idx, name)
+            return (1, 0, name)
+        results.sort(key=sort_key)
+        return results
 
     def _load_voices(self, voices):
-        self.voice_map = dict(voices)
-        self.voice_box.configure(values=[v[0] for v in voices])
-        if voices:
-            self.voice_box.current(0)
-            self.on_voice_selected(announce=False)
+        """接收 _collect_voices 的巢狀結構，填入角色/風格兩個 combobox。
+
+        啟動時一律以「只顯示偏好角色」模式載入（由 self.filter_voices_var 控制）。
+        """
+        # voices: [(speaker_name, uuid, [(style_name, style_id), ...]), ...]
+        self.all_voices = voices
+        # 依當前篩選開關決定要顯示哪些角色
+        self._apply_voice_filter()
+        # 預設選擇第一個偏好角色
+        if self.speaker_map:
+            first_name = self.speaker_box["values"][0]
+            self.speaker_box.set(first_name)
+            self.on_speaker_selected(announce=False)
+
+    def _apply_voice_filter(self):
+        """依 self.show_only_preferred 篩選角色清單，填入 speaker_box。"""
+        all_voices = getattr(self, "all_voices", [])
+        if not all_voices:
+            self.speaker_map = {}
+            self.speaker_box["values"] = []
+            return
+        show_only = getattr(self, "show_only_preferred", True)
+        if show_only:
+            filtered = []
+            for name, uuid, styles in all_voices:
+                if any(
+                    alias.lower() in name.lower()
+                    for _, aliases in PREFERRED_SPEAKERS
+                    for alias in aliases
+                ):
+                    filtered.append((name, uuid, styles))
+        else:
+            filtered = all_voices
+        # 沒有偏好角色時，退回全部，避免下拉為空
+        if show_only and not filtered:
+            filtered = all_voices
+        self.speaker_map = {
+            name: (uuid, styles) for name, uuid, styles in filtered
+        }
+        self.speaker_box["values"] = list(self.speaker_map.keys())
+        # 若目前選擇不在清單中，重設為第一個
+        if self.speaker_box.get() not in self.speaker_map and self.speaker_map:
+            self.speaker_box.set(next(iter(self.speaker_map)))
 
     def _apply_models(self):
-        """依目前服務來源填入模型下拉選單並選擇預設模型。"""
-        models = self.ollama_models if self.provider == "ollama" else self.openrouter_models
-        # OpenRouter 允許自行輸入模型 ID；Ollama 限定清單內項目
-        self.model_box.configure(
-            values=models, state="normal" if self.provider == "openrouter" else "readonly"
+        """依目前服務來源填入模型完整清單，套用目前篩選與預設選擇。"""
+        self._all_model_list = (
+            list(self.ollama_models) if self.provider == "ollama"
+            else list(self.openrouter_models)
         )
-        if not models:
+        # Ollama 也允許手動輸入（不再鎖 readonly，方便打字篩選）
+        self.model_box.configure(state="normal")
+        if not self._all_model_list:
+            self.model_box.configure(values=[])
             self.model_box.set("")
             self.on_model_selected()
             return
+        # 套用篩選（含 OpenRouter 預設只顯示 :free）
+        self._refresh_model_list()
+        # 預設選擇第一個符合 PREFERRED 的項目，否則用第一個
         keys = PREFERRED_MODELS if self.provider == "ollama" else PREFERRED_OPENROUTER_MODELS
-        default_index = next(
-            (i for i, m in enumerate(models) if any(key in m for key in keys)),
-            0,
+        visible = self.model_box["values"]
+        default_label = next(
+            (m for m in visible if any(key in m for key in keys)),
+            visible[0] if visible else "",
         )
-        self.model_box.current(default_index)
+        if default_label:
+            self.model_box.set(default_label)
         self.on_model_selected()
+
+    def _refresh_model_list(self):
+        """依目前 show_only_free 與篩選框文字，重新組合 model_box 的 values。"""
+        models = list(self._all_model_list)
+        if self.provider == "openrouter" and getattr(self, "show_only_free", True):
+            models = [m for m in models if m.lower().endswith(":free") or "ox-alpha" in m.lower()]
+        # 文字篩選（不限大小寫子字串）
+        keyword = ""
+        if getattr(self, "model_filter_entry", None):
+            keyword = self.model_filter_entry.get().strip().lower()
+        if keyword:
+            models = [m for m in models if keyword in m.lower()]
+        self.model_box.configure(values=models)
+        # 若目前選擇不在新清單中，保留原值不動（讓使用者可繼續輸入）
+
+    def _on_model_filter(self, event=None):
+        """在 model_box 內輸入時即時套用文字篩選（避免被視為完整模型名）。"""
+        # 避免方向鍵、Enter、Esc 等觸發重新整理
+        if event and event.keysym in (
+            "Up", "Down", "Left", "Right", "Return", "Escape", "Tab",
+        ):
+            return
+        if not getattr(self, "_all_model_list", None):
+            return
+        keyword = self.model_box.get().strip().lower()
+        if not keyword:
+            self._refresh_model_list()
+            return
+        models = [m for m in self._all_model_list if keyword in m.lower()]
+        # 加上目前輸入值本身（讓使用者繼續輸入完整 ID）
+        current = self.model_box.get().strip()
+        if current and current not in models:
+            models.append(current)
+        self.model_box.configure(values=models)
+
+    def _on_model_filter_entry(self, event=None):
+        """獨立篩選輸入框變更時，重新過濾 model_box 內容。"""
+        if not getattr(self, "_all_model_list", None):
+            return
+        self._refresh_model_list()
 
     def on_provider_selected(self, event=None, announce=True):
         provider = self.provider_box.get()
@@ -936,12 +1084,56 @@ class VoiceChatApp:
             self._append(tr("msg_switched_provider").format(provider), "sys")
         self._apply_models()
 
-    def on_voice_selected(self, event=None, announce=True):
-        label = self.voice_box.get()
-        if label in getattr(self, "voice_map", {}):
-            self.speaker_id = self.voice_map[label]
-            if announce:
-                self._append(tr("msg_selected_voice").format(label), "sys")
+    def on_speaker_selected(self, event=None, announce=True):
+        """角色（speaker）變更：刷新風格下拉，並自動選取第一個風格。"""
+        name = self.speaker_box.get()
+        info = getattr(self, "speaker_map", {}).get(name)
+        if not info:
+            return
+        _uuid, styles = info
+        # 風格清單（顯示用：含樣式名稱 + styleId）
+        self.style_box["values"] = [f"{s_name} [styleId={s_id}]" for s_name, s_id in styles]
+        if styles:
+            self.style_box.current(0)
+            self.on_voice_style_selected(announce=announce)
+
+    def on_voice_style_selected(self, event=None, announce=True):
+        """風格變更：設定 self.speaker_id 為 styleId（沿用 VOICEVOX 規格）。"""
+        label = self.style_box.get()
+        # 從 label 反查 styleId
+        if not label:
+            return
+        try:
+            style_id = int(label.rsplit("styleId=", 1)[-1].rstrip("]"))
+        except Exception:
+            return
+        self.speaker_id = style_id
+        if announce:
+            speaker_name = self.speaker_box.get()
+            style_name = label.rsplit(" [", 1)[0]
+            self._append(
+                tr("msg_selected_voice").format(f"{speaker_name}（{style_name}）"),
+                "sys",
+            )
+
+    def on_toggle_preferred_voices(self):
+        """切換是否只顯示偏好角色；切換後自動還原目前選擇（若有對應）。"""
+        self.show_only_preferred = bool(self.filter_voices_var.get())
+        prev_speaker_id = self.speaker_id
+        self._apply_voice_filter()
+        # 嘗試還原原本選的角色
+        if prev_speaker_id is not None:
+            for name, (_uuid, styles) in self.speaker_map.items():
+                for s_name, s_id in styles:
+                    if s_id == prev_speaker_id:
+                        self.speaker_box.set(name)
+                        self.on_speaker_selected(announce=False)
+                        return
+        # 找不到就選第一個
+        if self.speaker_map:
+            first = next(iter(self.speaker_map))
+            self.speaker_box.set(first)
+            self.on_speaker_selected(announce=False)
 
     def on_lang_selected(self, event=None):
         """切換語言：綁定目前對話的新語言並存檔後，自動重新啟動套用。
@@ -1021,11 +1213,26 @@ class VoiceChatApp:
         speaker_note = ""
         sid = session["speaker_id"]
         if isinstance(sid, int):
-            match = next((lbl for lbl, i in self.voice_map.items() if i == sid), None)
-            if match:
-                self.voice_box.set(match)
-                self.speaker_id = sid
-            else:
+            # 從完整清單反查對應的 (speaker_name, style_name)
+            for name, (_uuid, styles) in getattr(self, "all_voices", []):
+                for s_name, s_id in styles:
+                    if s_id == sid:
+                        # 確認目前篩選下此角色是否可見
+                        if name in self.speaker_map:
+                            self.speaker_box.set(name)
+                            self.on_speaker_selected(announce=False)
+                            # 設定正確的 style
+                            target_label = f"{s_name} [styleId={s_id}]"
+                            if target_label in self.style_box["values"]:
+                                self.style_box.set(target_label)
+                                self.on_voice_style_selected(announce=False)
+                        else:
+                            speaker_note = tr("msg_voice_missing").format(sid)
+                        sid = None  # 標記已處理
+                        break
+                if sid is None:
+                    break
+            if sid is not None:
                 speaker_note = tr("msg_voice_missing").format(sid)
 
         # 重播歷史（不朗讀）；摘要用的 system 訊息不顯示
@@ -1216,13 +1423,76 @@ class VoiceChatApp:
 
     # ---------- 角色設定 ----------
 
+    def open_persona_editor(self):
+        """開啟多行角色編輯對話框；確定後立即套用並更新單行 Entry 摘要。"""
+        if self.current_session is None:
+            self._append(tr("msg_no_session_persona"), "sys")
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.title(tr("dlg_persona_title"))
+        dlg.transient(self.root)
+        dlg.geometry("640x420")
+        # 置中
+        dlg.update_idletasks()
+        x = (dlg.winfo_screenwidth() - dlg.winfo_width()) // 2
+        y = (dlg.winfo_screenheight() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{x}+{y}")
+
+        frm = ttk.Frame(dlg, padding=10)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=tr("dlg_persona_prompt"), justify="left").pack(anchor="w")
+        editor = tk.Text(
+            frm, height=15, wrap="word",
+            font=("Microsoft JhengHei", 11), undo=True,
+        )
+        editor.pack(fill="both", expand=True, pady=(6, 8))
+        editor.insert("1.0", self.persona or "")
+
+        # 快捷鍵
+        def on_ok():
+            text = editor.get("1.0", "end-1c").rstrip()
+            self.persona = text
+            # 更新單行 Entry 摘要
+            self.persona_entry.delete(0, "end")
+            summary = text.splitlines()[0] if text else ""
+            if len(summary) > 60:
+                summary = summary[:57] + "..."
+            if summary:
+                self.persona_entry.insert(0, summary)
+            self.apply_persona()
+            dlg.destroy()
+
+        def on_cancel():
+            dlg.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+        ttk.Button(btns, text=tr("btn_cancel"), command=on_cancel).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text=tr("btn_ok"), command=on_ok).pack(side="right")
+        ttk.Button(
+            btns, text=tr("btn_load_template"),
+            command=lambda: editor.insert("end", _PERSONA_TEMPLATE),
+        ).pack(side="left")
+        # Enter 確定、Esc 取消
+        dlg.bind("<Escape>", lambda e: on_cancel())
+        editor.bind("<Control-Return>", lambda e: on_ok())
+        editor.focus_set()
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+
     def apply_persona(self):
         """套用角色設定：寫入目前對話檔並立即生效於下一則訊息。"""
         if self.current_session is None:
             self._append(tr("msg_no_session_persona"), "sys")
             return
-        text = self.persona_entry.get().strip()
-        self.persona = text
+        # 優先用 editor 編輯後的 self.persona（避免單行 Entry 截斷多行內容）
+        text = (self.persona or "").strip()
+        # 若 self.persona 為空，嘗試從單行 Entry 取（向後相容）
+        if not text:
+            text = self.persona_entry.get().strip()
+            self.persona = text
         self.write_session_file()
         name = self.current_session["name"]
         if text:
