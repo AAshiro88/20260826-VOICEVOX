@@ -61,6 +61,8 @@ def get_base_dir():
 ENV_PATH = get_base_dir() / ".env"
 # 對話紀錄（一般資料，可上 GIT）；角色設定存於各對話檔內，無獨立設定檔
 CHATS_DIR = get_base_dir() / "chats"
+# 多國語系載入路徑：locales/{zh,ja,en}.json
+LOCALES_DIR = get_base_dir() / "locales"
 
 
 def load_env(path):
@@ -76,6 +78,17 @@ def load_env(path):
     return env
 
 
+def load_locale(lang):
+    """載入指定語言的本地化字典，失敗時回傳空字典。"""
+    path = LOCALES_DIR / f"{lang}.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return {}
+    return {}
+
+
 # OpenRouter API 金鑰；請自行在 .env 填入，勿提交到版本控制
 OPENROUTER_API_KEY = load_env(ENV_PATH).get("OPENROUTER_API_KEY", "")
 
@@ -86,271 +99,40 @@ UI_LANG = "zh"
 
 
 def set_ui_lang(code):
-    """設定目前的介面與對話語言（僅接受支援的三種代碼）。"""
+    """設定目前的介面與對話語言（僅接受支援的三種代碼）；並預先載入該語言字典。"""
     global UI_LANG
     if code in ("zh", "ja", "en"):
         UI_LANG = code
+        # 預先載入語言字典，確保 tr() 能即時取用
+        get_locale_dict(code)
 
-# 介面固定文字（三語）；tr() 依 UI_LANG 取值，缺漏時退回繁體中文
-TR_TEXTS = {
-    "zh": {
-        "app_title": "VOICEVOX × Ollama／OpenRouter 語音對話",
-        "status_engine": "引擎狀態：",
-        "status_ollama": "Ollama：",
-        "status_or": "OpenRouter：",
-        "checking": "檢查中…",
-        "key_loaded": "金鑰已載入",
-        "key_missing": "未設定金鑰（.env）",
-        "conn_ok": "已連線",
-        "conn_ng": "未連線",
-        "available": "可用",
-        "paren_key": "（金鑰已載入）",
-        "paren_nokey": "（未設金鑰）",
-        "list_failed": "清單取得失敗\n",
-        "lbl_provider": "服務",
-        "lbl_voice": "聲音",
-        "lbl_model": "模型",
-        "lbl_lang": "語言",
-        "lbl_persona": "角色",
-        "lbl_session": "對話",
-        "btn_apply_persona": "套用角色",
-        "btn_new": "開新對話",
-        "btn_load": "載入",
-        "btn_rename": "改名",
-        "btn_delete": "刪除",
-        "btn_stop": "停止朗讀",
-        "btn_send": "送出",
-        "btn_ok": "確定",
-        "btn_cancel": "取消",
-        "provider_local": "Ollama（本機）",
-        "msg_engine_down": "無法連線 VOICEVOX 引擎。請先啟動 VOICEVOX.exe 後重新開啟本程式。\n\n",
-        "msg_no_voices": "找不到偏好的 3 個聲音（猫使ビィ、小夜/SAYO、もち子さん）。\n"
-        "請確認 VOICEVOX 已安裝這些角色語音。\n\n",
-        "msg_switched_provider": "[已切換服務：{}]\n",
-        "msg_selected_voice": "[已選擇聲音 {}]\n",
-        "msg_switched_lang": "[語言已切換：{}（重新啟動後套用介面與對話清單）]\n",
-        "msg_ui_restart": "[語言切換中，程式即將自動重新啟動…]\n",
-        "msg_no_session_persona": "[尚未建立對話，無法套用角色]\n",
-        "msg_persona_applied": "[角色設定已套用到「{}」：{}]\n",
-        "msg_persona_cleared": "[已清除「{}」的角色設定，回到預設]\n",
-        "you_prefix": "你＞ ",
-        "ai_jp": "AI（日）：",
-        "ai_zh": "AI（中）：",
-        "ai_en": "AI（英）：",
-        "msg_need_engine": "[請先確認 VOICEVOX 引擎已啟動]\n",
-        "msg_need_model": "[請先確認 Ollama／OpenRouter 已啟動且有可用模型]\n",
-        "msg_stopped": "[已停止朗讀]\n",
-        "msg_replaying": "[重新播放中…]\n",
-        "msg_busy_replay": "[目前有回覆處理中，請稍後再重播]\n",
-        "msg_no_voice": "[VOICEVOX 未連線，無法播放]\n",
-        "hint_replay": "[提示：雙擊有底線的朗讀句子可重新播放聲音]\n",
-        "msg_save_failed": "（對話存檔失敗：{}）\n",
-        "msg_load_failed": "[載入失敗：{}]\n",
-        "msg_rename_failed": "[改名失敗：{}]\n",
-        "msg_delete_failed": "[刪除失敗：{}]\n",
-        "msg_loaded": "[已載入對話「{}」，共 {} 則，可繼續聊]\n",
-        "msg_persona_restored": "[已還原角色設定：{}]\n",
-        "msg_voice_missing": "[注意：原聲音 styleId={} 不存在，維持目前選擇]\n",
-        "msg_new_chat": "[已開新對話：{}]\n",
-        "msg_deleted_new": "[已刪除「{}」，並自動開了新對話]\n",
-        "msg_deleted": "[已刪除「{}」]\n",
-        "msg_renamed": "[已改名：「{}」→「{}」]\n",
-        "msg_titled": "[已命名為「{}」]\n",
-        "dlg_delete_title": "刪除對話",
-        "dlg_delete_body": "確定要刪除「{}」嗎？\n此動作無法復原。",
-        "dlg_rename_title": "重新命名對話",
-        "dlg_rename_prompt": "新的對話名稱：",
-        "dlg_lang_title": "選擇語言",
-        "dlg_lang_prompt": "請選擇介面與對話語言：",
-        "msg_summarizing": "[對話過長，整理歷史中，請稍候…（此時無法送出訊息）]\n",
-        "msg_summary_failed": "[摘要失敗，改用完整歷史繼續（{}）]\n",
-        "msg_summary_empty": "[摘要為空，改用完整歷史繼續]\n",
-        "msg_summary_done": "[整理完成，舊歷史已壓縮為摘要]\n",
-        "msg_llm_failed": "（呼叫對話服務失敗：{}）\n",
-        "msg_no_key": "（尚未設定 OpenRouter 金鑰，請在本程式同目錄的 .env "
-        "填入 OPENROUTER_API_KEY 後重新啟動）\n",
-        "msg_tts_failed": "（語音合成失敗：{}）\n",
-        "role_user": "使用者",
-        "btn_retry": "重新生成",
-        "msg_retrying": "[重新生成中…]\n",
-        "msg_nothing_retry": "[沒有可重新生成的回覆]\n",
-        "msg_busy_retry": "[請先等待目前回覆完成]\n",
-    },
-    "ja": {
-        "app_title": "VOICEVOX × Ollama／OpenRouter 音声チャット",
-        "status_engine": "エンジン状態：",
-        "status_ollama": "Ollama：",
-        "status_or": "OpenRouter：",
-        "checking": "確認中…",
-        "key_loaded": "キー読み込み済み",
-        "key_missing": "キー未設定（.env）",
-        "conn_ok": "接続済み",
-        "conn_ng": "未接続",
-        "available": "利用可能",
-        "paren_key": "（キーあり）",
-        "paren_nokey": "（キーなし）",
-        "list_failed": "一覧の取得に失敗しました\n",
-        "lbl_provider": "サービス",
-        "lbl_voice": "声",
-        "lbl_model": "モデル",
-        "lbl_lang": "言語",
-        "lbl_persona": "人格",
-        "lbl_session": "会話",
-        "btn_apply_persona": "人格を適用",
-        "btn_new": "新規会話",
-        "btn_load": "読込",
-        "btn_rename": "改名",
-        "btn_delete": "削除",
-        "btn_stop": "読み上げ停止",
-        "btn_send": "送信",
-        "btn_ok": "決定",
-        "btn_cancel": "キャンセル",
-        "provider_local": "Ollama（ローカル）",
-        "msg_engine_down": "VOICEVOX エンジンに接続できません。"
-        "VOICEVOX.exe を起動してから、本プログラムを開き直してください。\n\n",
-        "msg_no_voices": "指定の 3 つの声（猫使ビィ、小夜/SAYO、もち子さん）が見つかりません。\n"
-        "VOICEVOX にこれらのボイスが入っているか確認してください。\n\n",
-        "msg_switched_provider": "[サービスを切り替えました：{}]\n",
-        "msg_selected_voice": "[声を選択しました：{}]\n",
-        "msg_switched_lang": "[言語を切り替えました：{}（再起動後に表示と一覧に適用）]\n",
-        "msg_ui_restart": "[言語を切り替えるため、プログラムを再起動します…]\n",
-        "msg_no_session_persona": "[会話が未作成のため、人格を適用できません]\n",
-        "msg_persona_applied": "[「{}」に人格設定を適用しました：{}]\n",
-        "msg_persona_cleared": "[「{}」の人格設定を消去し、デフォルトに戻しました]\n",
-        "you_prefix": "あなた＞ ",
-        "ai_jp": "AI（日）：",
-        "ai_zh": "AI（中）：",
-        "ai_en": "AI（英）：",
-        "msg_need_engine": "[VOICEVOX エンジンの起動を確認してください]\n",
-        "msg_need_model": "[Ollama／OpenRouter の起動と利用可能なモデルを確認してください]\n",
-        "msg_stopped": "[読み上げを停止しました]\n",
-        "msg_replaying": "[再再生中…]\n",
-        "msg_busy_replay": "[処理中の返信があるため、後でもう一度お試しください]\n",
-        "msg_no_voice": "[VOICEVOX 未接続のため、再生できません]\n",
-        "hint_replay": "[ヒント：下線付きの読み上げ文をダブルクリックすると再再生できます]\n",
-        "msg_save_failed": "（会話の保存に失敗：{}）\n",
-        "msg_load_failed": "[読込失敗：{}]\n",
-        "msg_rename_failed": "[改名失敗：{}]\n",
-        "msg_delete_failed": "[削除失敗：{}]\n",
-        "msg_loaded": "[会話「{}」を読み込みました（{}件）。続きをどうぞ]\n",
-        "msg_persona_restored": "[人格設定を復元：{}]\n",
-        "msg_voice_missing": "[注意：元の声 styleId={} が存在しないため、現在の選択を維持します]\n",
-        "msg_new_chat": "[新しい会話を開始：{}]\n",
-        "msg_deleted_new": "[「{}」を削除し、新しい会話を作成しました]\n",
-        "msg_deleted": "[「{}」を削除しました]\n",
-        "msg_renamed": "[「{}」→「{}」に改名しました]\n",
-        "msg_titled": "[「{}」と命名しました]\n",
-        "dlg_delete_title": "会話の削除",
-        "dlg_delete_body": "「{}」を削除しますか？\nこの操作は取り消せません。",
-        "dlg_rename_title": "会話の改名",
-        "dlg_rename_prompt": "新しい会話名：",
-        "dlg_lang_title": "言語を選択",
-        "dlg_lang_prompt": "インターフェースと会話の言語を選択してください：",
-        "msg_summarizing": "[会話が長いため履歴を整理中です。お待ちください…"
-        "（この間は送信できません）]\n",
-        "msg_summary_failed": "[要約に失敗したため、完全な履歴で続行します（{}）]\n",
-        "msg_summary_empty": "[要約が空のため、完全な履歴で続行します]\n",
-        "msg_summary_done": "[整理完了：古い履歴を要約に圧縮しました]\n",
-        "msg_llm_failed": "（対話サービスの呼び出しに失敗：{}）\n",
-        "msg_no_key": "（OpenRouter キーが未設定です。同じフォルダーの .env に "
-        "OPENROUTER_API_KEY を記入して再起動してください）\n",
-        "msg_tts_failed": "（音声合成に失敗：{}）\n",
-        "role_user": "ユーザー",
-        "btn_retry": "再生成",
-        "msg_retrying": "[再生成中…]\n",
-        "msg_nothing_retry": "[再生成する訊息がありません]\n",
-        "msg_busy_retry": "[只今処理中の返信をお待ちください]\n",
-    },
-    "en": {
-        "app_title": "VOICEVOX × Ollama／OpenRouter Voice Chat",
-        "status_engine": "Engine: ",
-        "status_ollama": "Ollama: ",
-        "status_or": "OpenRouter: ",
-        "checking": "Checking…",
-        "key_loaded": "Key loaded",
-        "key_missing": "No key (.env)",
-        "conn_ok": "Connected",
-        "conn_ng": "Not connected",
-        "available": "Available",
-        "paren_key": " (key loaded)",
-        "paren_nokey": " (no key)",
-        "list_failed": "Failed to fetch the model list\n",
-        "lbl_provider": "Service",
-        "lbl_voice": "Voice",
-        "lbl_model": "Model",
-        "lbl_lang": "Language",
-        "lbl_persona": "Persona",
-        "lbl_session": "Chat",
-        "btn_apply_persona": "Apply persona",
-        "btn_new": "New chat",
-        "btn_load": "Load",
-        "btn_rename": "Rename",
-        "btn_delete": "Delete",
-        "btn_stop": "Stop speech",
-        "btn_send": "Send",
-        "btn_ok": "OK",
-        "btn_cancel": "Cancel",
-        "provider_local": "Ollama (local)",
-        "msg_engine_down": "Cannot connect to the VOICEVOX engine. "
-        "Start VOICEVOX.exe and reopen this program.\n\n",
-        "msg_no_voices": "Preferred voices not found (Nekotsuka Bi, SAYO, Mochiko).\n"
-        "Make sure your VOICEVOX install includes these characters.\n\n",
-        "msg_switched_provider": "[Switched service: {}]\n",
-        "msg_selected_voice": "[Selected voice: {}]\n",
-        "msg_switched_lang": "[Language switched: {}; restarting to apply to UI and chat list]\n",
-        "msg_ui_restart": "[Switching language; restarting…]\n",
-        "msg_no_session_persona": "[No active chat; cannot apply persona]\n",
-        "msg_persona_applied": "[Persona applied to \"{}\": {}]\n",
-        "msg_persona_cleared": "[Cleared persona for \"{}\"; back to default]\n",
-        "you_prefix": "You> ",
-        "ai_jp": "AI (JA): ",
-        "ai_zh": "AI (ZH): ",
-        "ai_en": "AI (EN): ",
-        "msg_need_engine": "[Please make sure the VOICEVOX engine is running]\n",
-        "msg_need_model": "[Please make sure Ollama/OpenRouter is running and a model is available]\n",
-        "msg_stopped": "[Speech stopped]\n",
-        "msg_replaying": "[Replaying…]\n",
-        "msg_busy_replay": "[A reply is still being processed; please try again later]\n",
-        "msg_no_voice": "[VOICEVOX not connected; cannot play]\n",
-        "hint_replay": "[Tip: double-click an underlined spoken line to replay the audio]\n",
-        "msg_save_failed": "(Failed to save chat: {})\n",
-        "msg_load_failed": "[Load failed: {}]\n",
-        "msg_rename_failed": "[Rename failed: {}]\n",
-        "msg_delete_failed": "[Delete failed: {}]\n",
-        "msg_loaded": "[Loaded chat \"{}\" ({} messages); you can continue chatting]\n",
-        "msg_persona_restored": "[Restored persona: {}]\n",
-        "msg_voice_missing": "[Notice: saved voice styleId={} no longer exists; keeping current selection]\n",
-        "msg_new_chat": "[Started a new chat: {}]\n",
-        "msg_deleted_new": "[Deleted \"{}\" and started a new chat]\n",
-        "msg_deleted": "[Deleted \"{}\"]\n",
-        "msg_renamed": "[Renamed \"{}\" to \"{}\"]\n",
-        "msg_titled": "[Named \"{}\"]\n",
-        "dlg_delete_title": "Delete Chat",
-        "dlg_delete_body": "Delete \"{}\"?\nThis action cannot be undone.",
-        "dlg_rename_title": "Rename Chat",
-        "dlg_rename_prompt": "New chat name:",
-        "dlg_lang_title": "Select Language",
-        "dlg_lang_prompt": "Choose the UI & chat language:",
-        "msg_summarizing": "[History too long; summarizing, please wait… (sending is disabled)]\n",
-        "msg_summary_failed": "[Summarization failed; continuing with full history ({})]\n",
-        "msg_summary_empty": "[Empty summary; continuing with full history]\n",
-        "msg_summary_done": "[Done: older history compressed into a summary]\n",
-        "msg_llm_failed": "(Chat request failed: {})\n",
-        "msg_no_key": "(OpenRouter key not set. Put OPENROUTER_API_KEY into the .env "
-        "next to this program and restart.)\n",
-        "msg_tts_failed": "(Speech synthesis failed: {})\n",
-        "role_user": "User",
-        "btn_retry": "Retry",
-        "msg_retrying": "[Regenerating…]\n",
-        "msg_nothing_retry": "[Nothing to retry]\n",
-        "msg_busy_retry": "[Wait for current reply]\n",
-    },
-}
+# 介面固定文字（三語）；動態載入 locales/{lang}.json
+LOCALE_DICTS = {}  # 模組層級快取，鍵為語言代碼，值為對應的字典
+
+
+def get_locale_dict(lang):
+    """取得指定語言的字典，會自動快取。若不支援則回退 zh。"""
+    if lang not in ("zh", "ja", "en"):
+        lang = "zh"
+    if lang not in LOCALE_DICTS:
+        LOCALE_DICTS[lang] = load_locale(lang)
+    return LOCALE_DICTS[lang]
 
 
 def tr(key):
     """取得目前介面語言的固定文字；缺漏時退回繁體中文。"""
-    return TR_TEXTS.get(UI_LANG, {}).get(key) or TR_TEXTS["zh"].get(key) or key
+    lang = UI_LANG
+    locale_dict = get_locale_dict(lang)
+    result = locale_dict.get(key)
+    if result:
+        return result
+    # 回退：嘗試 zh
+    locale_dict_zh = get_locale_dict("zh")
+    result = locale_dict_zh.get(key)
+    if result:
+        return result
+    # 再回退：直接回傳 key（保持原有行為）
+    return key
 
 
 def restart_app(lang=None):
@@ -465,8 +247,8 @@ PREFERRED_MODELS = ["qwen3.6", "qwen3.5", "gemma4"]
 # OpenRouter 模型偏好關鍵字（用於預設選擇）
 PREFERRED_OPENROUTER_MODELS = ["ox-alpha", "gemini", "gpt", "claude"]
 
-# 只保留免費模型（:free 結尾）與 ox-alpha
-OPENROUTER_KEEP_FREE_ONLY = True
+# 顯示所有 OpenRouter 模型（不限制免費）
+OPENROUTER_KEEP_FREE_ONLY = False
 
 # 歷史長度上限（字元數），超過就自動整理成摘要
 HISTORY_CHAR_LIMIT = 5000
@@ -494,21 +276,19 @@ SYSTEM_PROMPTS = {
     ),
     "zh": (
         "你是透過 VOICEVOX 語音合成與使用者對話的夥伴。VOICEVOX 只能朗讀日文，"
-        "所以你的每一次回覆都必須嚴格使用下列兩行格式，不得加入其他內容：\n"
-        "日: <自然口語的日文回覆，將被朗讀>\n"
-        "中: <前述日文的繁體中文翻譯>\n"
+        "所以你的每一次回覆都必須嚴格輸出 JSON 格式，鍵名為：\n"
+        "{\"zh\": \"<前述日文的繁體中文翻譯>\", \"jp\": \"<自然口語的日文回覆，將被朗讀>\"}\n"
         "不要使用 Markdown、表情符號或條列式，回覆保持簡短、口語化。\n"
-        "注意：對話紀錄中你過去的回覆只會顯示中文譯文，但你每次的新回覆仍必須使用上述兩行格式。"
+        "注意：對話紀錄中你過去的回覆只會顯示中文譯文，但你每次的新回覆仍必須使用上述 JSON 格式。"
     ),
     "en": (
         "You are a companion chatting with the user through VOICEVOX speech synthesis. "
         "VOICEVOX can only read Japanese aloud, so every reply MUST strictly follow "
-        "this two-line format with no other content:\n"
-        "英: <your reply in natural spoken English>\n"
-        "日: <a natural spoken Japanese version of the above, to be read aloud>\n"
+        "this JSON format with no other content:\n"
+        "{\"en\": \"<your reply in natural spoken English>\", \"jp\": \"<a natural spoken Japanese version of the above, to be read aloud>\"}\n"
         "Do not use Markdown, emoji, or bullet lists. Keep replies short and conversational.\n"
         "Note: your past replies in the history show only the English line, "
-        "but each new reply must still use the two-line format above."
+        "but each new reply must still use the JSON format above."
     ),
 }
 
@@ -604,71 +384,55 @@ def detect_lang(text):
     return max([(ja, "ja"), (zh, "zh"), (en, "en")], key=lambda x: x[0])[1]
 
 
-def ensure_lang_prefix(text, lang):
-    """若回覆缺少語言前綴，依指定語言自動補上。"""
-    if _LINE_PREFIX_RE.search(text):
-        return text
-    prefix_map = {"ja": "日", "zh": "中", "en": "英"}
-    tag = prefix_map.get(lang)
-    if not tag:
-        return text
-    return f"{tag}: {text.strip()}"
+def _extract_json(text):
+    """解析 JSON 格式回覆，回傳 (parts, fallback)。
 
-
-_LINE_PREFIX_RE = re.compile(r"^(日|中|英)\s*[:：]\s*(.*)$", re.MULTILINE)
+    parts 為 {"jp": …, "zh": …, "en": …}（僅收錄有出現的鍵）；
+    解析失敗時 fallback 為 None。
+    """
+    parts = {}
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            for key in ("jp", "zh", "en"):
+                if key in data and data[key]:
+                    parts[key] = str(data[key])
+    except Exception:
+        pass
+    return parts, None  # JSON 格式一律視為有前綴（解析結果），fallback 設為 None
 
 
 def _extract_prefixed(text):
-    """把回覆拆成各語言行，回傳 (parts, fallback)。
-
-    parts 為 {"jp": …, "zh": …, "en": …}（僅收錄有出現的行）；
-    全文皆無前綴行時 fallback 為整段文字，否則為 None。
-    """
-    parts = {}
-    has_prefix = False
-    for line in text.splitlines():
-        m = _LINE_PREFIX_RE.match(line.strip())
-        if not m:
-            continue
-        has_prefix = True
-        key = {"日": "jp", "中": "zh", "英": "en"}[m.group(1)]
-        if not parts.get(key):
-            parts[key] = m.group(2).strip()
-    return parts, (None if has_prefix else text.strip())
+    """保留相容性：若非 JSON 格式則嘗試舊的前綴解析（已棄用，實際上不使用）。"""
+    # 現在只在遺漏 JSON 解析時回退使用，但我們直接回傲 None 讓上層處理
+    return {}, None
 
 
 def reply_parts(text, lang):
-    """依對話語言拆解回覆，回傳（對話用文字, 朗讀用文字）。
+    """依對話語言從 JSON 回覆拆解，回傳（對話用文字, 朗讀用文字）。
 
-    - 日本語模式：全文即對話與朗讀文字，不需翻譯。
-    - 中文／English 模式：對話文字取「中:/英:」行，朗讀文字取「日:」行；
-      缺對話語言行時依序退回其他非日文行、日文行、全文。
+    - 日本語模式：只取 jp 欄位
+    - 中文／English 模式：取對應語言欄位 + jp (日文朗讀) 欄位
     """
     text = text.strip()
-    parts, fallback = _extract_prefixed(text)
+    parts, fallback = _extract_json(text)
     if lang == "ja":
-        conv = parts.get("jp") or fallback or text
+        conv = parts.get("jp") or ("" if not parts else str(list(parts.values())[0]))
     else:
-        conv = (
-            parts.get(lang)
-            or parts.get("zh")
-            or parts.get("en")
-            or parts.get("jp")
-            or fallback
-            or text
-        )
-    voice = parts.get("jp") or ("" if conv else "")
+        # zh 或 en 模式：優先取對應語言，其次 jp (日文供 VOICEVOX 朗讀)
+        conv = parts.get(lang) or parts.get("jp") or ("" if not parts else str(list(parts.values())[0]))
+    voice = parts.get("jp") or ("" if not parts else "")
     return conv, voice
 
 
 def assistant_conv_text(content, lang):
     """取出一則舊回覆中要送給模型的對話語言內容。
 
-    目前語言的行不存在時（例如中途切換過語言），改取其他非日文行，
+    目前語言的欄位不存在時（例如中途切換過語言），改取其他非日文欄位，
     最後才退回原文，確保不會整段雙語重送。
     """
     content = content.strip()
-    parts, fallback = _extract_prefixed(content)
+    parts, fallback = _extract_json(content)
     if lang == "ja":
         return parts.get("jp") or fallback or content
     conv = parts.get(lang) or parts.get("zh") or parts.get("en")
@@ -1085,7 +849,7 @@ class VoiceChatApp:
             self._emit("ollama_ng", tr("conn_ng"))
             self._emit("ollama_models", [])
 
-        # 載入 OpenRouter 模型清單（公開端點，不需金鑰），只保留免費模型與 ox-alpha
+        # 載入 OpenRouter 模型清單（公開端點，不需金鑰）
         if not OPENROUTER_API_KEY:
             self._emit("or_ng", tr("key_missing"))
         try:
@@ -1279,20 +1043,6 @@ class VoiceChatApp:
                 # 註冊成可雙擊重播的訊息（只顯示不朗讀）
                 self._register_ai_message(conv, voice)
                 shown += 1
-
-        # 載入時修復壞掉的語言標籤並寫回檔案（一次性修復）
-        fixed_any = False
-        for m in history:
-            if isinstance(m, dict) and m.get("role") == "assistant":
-                original = m["content"]
-                m["content"] = ensure_lang_prefix(original, session["lang"])
-                if m["content"] != original:
-                    fixed_any = True
-        if fixed_any:
-            try:
-                self.write_session_file()
-            except Exception:
-                pass
 
         self._append(tr("msg_loaded").format(session["name"], shown), "sys")
         if self.persona:
@@ -1708,7 +1458,7 @@ class VoiceChatApp:
             self._emit("busy", False)
             return
 
-        reply = ensure_lang_prefix(reply, self.convo_lang)
+        # 不再補前綴；直接以 JSON 解析。原始回覆原封不動存進歷史。
         self.history.append({"role": "assistant", "content": reply})
         self.write_session_file()
 
