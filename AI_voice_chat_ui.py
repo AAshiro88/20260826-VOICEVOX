@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 import urllib.request
 import tkinter as tk
@@ -46,9 +47,10 @@ import winsound
 # 第三方套件：將對話語言的回覆翻譯成日文，供 VOICEVOX 朗讀。
 # 延後報錯可讓使用者在尚未安裝套件時仍能開啟程式並閱讀安裝提示。
 try:
-    from deep_translator import GoogleTranslator
+    from deep_translator import GoogleTranslator, MyMemoryTranslator
 except ImportError:
     GoogleTranslator = None
+    MyMemoryTranslator = None
 
 ENGINE_URL = "http://127.0.0.1:50021"
 OLLAMA_URL = "http://127.0.0.1:11434"
@@ -491,18 +493,47 @@ def assistant_conv_text(content, lang):
     return conv
 
 
+def _try_translate(translator_cls, source, target, text, retries=2):
+    """嘗試用指定翻譯器翻譯，失敗時重試。回傳翻譯結果或拋出異常。"""
+    if translator_cls is None:
+        raise RuntimeError("翻譯器未安裝")
+    last_err = None
+    for attempt in range(retries):
+        try:
+            result = translator_cls(source=source, target=target).translate(text)
+            if result and result.strip():
+                return result.strip()
+            last_err = RuntimeError("翻譯器未傳回結果")
+        except Exception as exc:
+            last_err = exc
+        if attempt < retries - 1:
+            time.sleep(1)
+    raise last_err
+
+
 def translate_to_japanese(text, lang):
-    """以 deep-translator 把中文或英文回覆轉成供 VOICEVOX 朗讀的日文。"""
+    """以 deep-translator 把中文或英文回覆轉成供 VOICEVOX 朗讀的日文。
+
+    依序嘗試 Google → MyMemory，每個翻譯器各重試 2 次。
+    """
     text = (text or "").strip()
     if not text or lang == "ja":
         return text
-    if GoogleTranslator is None:
+    if GoogleTranslator is None and MyMemoryTranslator is None:
         raise RuntimeError("找不到 deep-translator；請執行 pip install -r requirements.txt")
     source = {"zh": "zh-TW", "en": "en"}.get(lang, "auto")
-    translated = GoogleTranslator(source=source, target="ja").translate(text)
-    if not translated or not translated.strip():
-        raise RuntimeError("deep-translator 未傳回日文翻譯")
-    return translated.strip()
+    translators = [
+        (GoogleTranslator, source),
+        (MyMemoryTranslator, source),
+    ]
+    last_err = None
+    for cls, src in translators:
+        try:
+            return _try_translate(cls, src, "ja", text)
+        except Exception as exc:
+            last_err = exc
+            continue
+    raise RuntimeError(f"所有翻譯器皆失敗：{last_err}")
 
 
 def migrate_assistant_voices(history, lang):
@@ -1108,17 +1139,25 @@ class VoiceChatApp:
             for style_name, _style_id in styles
             if style_name.strip() and style_name not in translated_map
         })
-        if not names or GoogleTranslator is None:
+        if not names:
             return translated_map
-        try:
-            remote_translations = GoogleTranslator(source="ja", target=target).translate_batch(names)
-            translated_map.update({
-                name: result.strip()
-                for name, result in zip(names, remote_translations)
-                if result and result.strip() and result.strip() != name
-            })
-        except Exception:
-            pass
+        translators = [
+            cls for cls in (GoogleTranslator, MyMemoryTranslator)
+            if cls is not None
+        ]
+        if not translators:
+            return translated_map
+        for cls in translators:
+            try:
+                remote_translations = cls(source="ja", target=target).translate_batch(names)
+                translated_map.update({
+                    name: result.strip()
+                    for name, result in zip(names, remote_translations)
+                    if result and result.strip() and result.strip() != name
+                })
+                break
+            except Exception:
+                continue
         return translated_map
 
     def _style_label(self, style_name, style_id):
