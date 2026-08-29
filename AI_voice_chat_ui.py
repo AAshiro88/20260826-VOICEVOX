@@ -47,10 +47,9 @@ import winsound
 # 第三方套件：將對話語言的回覆翻譯成日文，供 VOICEVOX 朗讀。
 # 延後報錯可讓使用者在尚未安裝套件時仍能開啟程式並閱讀安裝提示。
 try:
-    from deep_translator import GoogleTranslator, MyMemoryTranslator
+    from deep_translator import GoogleTranslator
 except ImportError:
     GoogleTranslator = None
-    MyMemoryTranslator = None
 
 ENGINE_URL = "http://127.0.0.1:50021"
 OLLAMA_URL = "http://127.0.0.1:11434"
@@ -493,47 +492,29 @@ def assistant_conv_text(content, lang):
     return conv
 
 
-def _try_translate(translator_cls, source, target, text, retries=2):
-    """嘗試用指定翻譯器翻譯，失敗時重試。回傳翻譯結果或拋出異常。"""
-    if translator_cls is None:
-        raise RuntimeError("翻譯器未安裝")
+def translate_to_japanese(text, lang, retries=2):
+    """以 deep-translator 把中文或英文回覆轉成供 VOICEVOX 朗讀的日文。
+
+    使用 GoogleTranslator，失敗時自動重試。
+    """
+    text = (text or "").strip()
+    if not text or lang == "ja":
+        return text
+    if GoogleTranslator is None:
+        raise RuntimeError("找不到 deep-translator；請執行 pip install -r requirements.txt")
+    source = {"zh": "zh-TW", "en": "en"}.get(lang, "auto")
     last_err = None
     for attempt in range(retries):
         try:
-            result = translator_cls(source=source, target=target).translate(text)
-            if result and result.strip():
-                return result.strip()
-            last_err = RuntimeError("翻譯器未傳回結果")
+            translated = GoogleTranslator(source=source, target="ja").translate(text)
+            if translated and translated.strip():
+                return translated.strip()
+            last_err = RuntimeError("Google 翻譯未傳回結果")
         except Exception as exc:
             last_err = exc
         if attempt < retries - 1:
             time.sleep(1)
     raise last_err
-
-
-def translate_to_japanese(text, lang):
-    """以 deep-translator 把中文或英文回覆轉成供 VOICEVOX 朗讀的日文。
-
-    依序嘗試 Google → MyMemory，每個翻譯器各重試 2 次。
-    """
-    text = (text or "").strip()
-    if not text or lang == "ja":
-        return text
-    if GoogleTranslator is None and MyMemoryTranslator is None:
-        raise RuntimeError("找不到 deep-translator；請執行 pip install -r requirements.txt")
-    source = {"zh": "zh-TW", "en": "en"}.get(lang, "auto")
-    translators = [
-        (GoogleTranslator, source),
-        (MyMemoryTranslator, source),
-    ]
-    last_err = None
-    for cls, src in translators:
-        try:
-            return _try_translate(cls, src, "ja", text)
-        except Exception as exc:
-            last_err = exc
-            continue
-    raise RuntimeError(f"所有翻譯器皆失敗：{last_err}")
 
 
 def migrate_assistant_voices(history, lang):
@@ -880,6 +861,11 @@ class VoiceChatApp:
             action_buttons, text=tr("btn_retry"), command=self.retry_last
         )
         self.retry_btn.pack(fill="x")
+        self.retry_translate_btn = ttk.Button(
+            action_buttons, text=tr("btn_retry_translate"),
+            command=self.retry_translation
+        )
+        self.retry_translate_btn.pack(fill="x", pady=(4, 0))
 
     def _clear_chat_display(self):
         """清空對話顯示區。"""
@@ -928,6 +914,15 @@ class VoiceChatApp:
         if not self.replay_hint_shown:
             self.replay_hint_shown = True
             self._append(tr("hint_replay"), "sys")
+
+    def _refresh_replay_for_index(self, history_idx, voice):
+        """重新翻譯成功後，更新對應回覆的朗讀稿與重播資料。"""
+        conv = self.history[history_idx].get("content", "")
+        # 找到 replay_texts 中空 voice 的 tag（即翻譯失敗時建立的）
+        for tag in list(self.replay_texts):
+            if not self.replay_texts[tag]:
+                self.replay_texts[tag] = voice
+                break
 
     # ---------- 佇列輪詢：工作執行緒透過佇列更新畫面 ----------
 
@@ -980,14 +975,27 @@ class VoiceChatApp:
                     self.busy = msg[1]
                     state = "disabled" if self.busy else "normal"
                     self.send_button.configure(state=state)
-                    for btn in (self.new_btn, self.load_btn, self.rename_btn, self.delete_btn, self.retry_btn):
+                    for btn in (self.new_btn, self.load_btn, self.rename_btn, self.delete_btn, self.retry_btn, self.retry_translate_btn):
                         btn.configure(state=state)
+                elif kind == "retry_translate_done":
+                    target_idx, voice = msg[1], msg[2]
+                    # 重繪該則回覆的朗讀行（更新 replay tag）
+                    self._refresh_replay_for_index(target_idx, voice)
+                    self._emit("busy", False)
         except queue.Empty:
             pass
         # retry 按鈕：忙碌中或歷史為空時 disable；
         # 呼叫失敗後歷史仍保留待重送的使用者訊息，因此不能只看 displayed_asst_count
         self.retry_btn.configure(
             state="disabled" if self.busy or not self.history else "normal"
+        )
+        # 重新翻譯按鈕：忙碌中或沒有缺 voice 的回覆時 disable
+        has_untranslated = any(
+            m.get("role") == "assistant" and not m.get("voice")
+            for m in self.history
+        )
+        self.retry_translate_btn.configure(
+            state="disabled" if self.busy or not has_untranslated else "normal"
         )
         self.root.after(100, self._poll_queue)
 
@@ -1139,25 +1147,17 @@ class VoiceChatApp:
             for style_name, _style_id in styles
             if style_name.strip() and style_name not in translated_map
         })
-        if not names:
+        if not names or GoogleTranslator is None:
             return translated_map
-        translators = [
-            cls for cls in (GoogleTranslator, MyMemoryTranslator)
-            if cls is not None
-        ]
-        if not translators:
-            return translated_map
-        for cls in translators:
-            try:
-                remote_translations = cls(source="ja", target=target).translate_batch(names)
-                translated_map.update({
-                    name: result.strip()
-                    for name, result in zip(names, remote_translations)
-                    if result and result.strip() and result.strip() != name
-                })
-                break
-            except Exception:
-                continue
+        try:
+            remote_translations = GoogleTranslator(source="ja", target=target).translate_batch(names)
+            translated_map.update({
+                name: result.strip()
+                for name, result in zip(names, remote_translations)
+                if result and result.strip() and result.strip() != name
+            })
+        except Exception:
+            pass
         return translated_map
 
     def _style_label(self, style_name, style_id):
@@ -1825,6 +1825,40 @@ class VoiceChatApp:
             target=self.chat_worker, args=(last_user,), kwargs={"append_user": False}, daemon=True
         ).start()
 
+    def retry_translation(self):
+        """重新翻譯最後一則沒有日文朗讀稿的 AI 回覆。"""
+        if self.busy:
+            self._append(tr("msg_busy_retry"), "sys")
+            return
+        if not self.history:
+            self._append(tr("msg_nothing_retry_translate"), "sys")
+            return
+        # 從尾端往前找最後一則沒有 voice 的 assistant 回覆
+        target_idx = None
+        for i in range(len(self.history) - 1, -1, -1):
+            m = self.history[i]
+            if m.get("role") == "assistant" and not m.get("voice"):
+                target_idx = i
+                break
+        if target_idx is None:
+            self._append(tr("msg_nothing_retry_translate"), "sys")
+            return
+        self._append(tr("msg_retry_translate"), "sys")
+        self._emit("busy", True)
+
+        def worker():
+            try:
+                conv = self.history[target_idx]["content"]
+                voice = translate_to_japanese(conv, self.convo_lang)
+                self.history[target_idx]["voice"] = voice
+                self.write_session_file()
+                self._emit("retry_translate_done", target_idx, voice)
+            except Exception as e:
+                self._emit("text", tr("msg_retry_translate_fail").format(e), "sys")
+                self._emit("busy", False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def replay_message(self, tag):
         """重新合成播放指定則 AI 回覆的朗讀內容。"""
         voice = self.replay_texts.get(tag)
@@ -1971,7 +2005,7 @@ class VoiceChatApp:
         except Exception as e:
             # 翻譯服務失敗不能讓整個對話消失；保留文字回覆並略過朗讀。
             voice = ""
-            self._emit("text", f"[翻譯失敗，略過朗讀] {e}\n", "sys")
+            self._emit("text", f"[翻譯失敗，略過朗讀] {e}\n可按「重新翻譯」重試\n", "sys")
         assistant_message = {"role": "assistant", "content": conv}
         if voice:
             assistant_message["voice"] = voice

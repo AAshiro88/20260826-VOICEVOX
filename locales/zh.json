@@ -83,7 +83,12 @@
   "msg_tts_failed": "（語音合成失敗：{}）\n",
   "role_user": "使用者",
   "btn_retry": "重新生成",
+  "btn_retry_translate": "重新翻譯",
   "msg_retrying": "[重新生成中…]\n",
+  "msg_retry_translate": "[重新翻譯中…]\n",
+  "msg_retry_translate_done": "[翻譯完成，已更新朗讀稿]\n",
+  "msg_retry_translate_fail": "[重新翻譯失敗：{}]\n",
+  "msg_nothing_retry_translate": "[沒有需要重新翻譯的回覆]\n",
   "msg_nothing_retry": "[沒有可重新生成的回覆]\n",
   "msg_busy_retry": "[請先等待目前回覆完成]\n"
 }

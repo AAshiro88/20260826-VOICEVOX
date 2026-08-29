@@ -83,7 +83,12 @@
   "msg_tts_failed": "（音声合成に失敗：{}）\n",
   "role_user": "ユーザー",
   "btn_retry": "再生成",
+  "btn_retry_translate": "再翻訳",
   "msg_retrying": "[再生成中…]\n",
+  "msg_retry_translate": "[再翻訳中…]\n",
+  "msg_retry_translate_done": "[翻訳を更新しました]\n",
+  "msg_retry_translate_fail": "[再翻訳に失敗：{}]\n",
+  "msg_nothing_retry_translate": "[再翻訳する返信がありません]\n",
   "msg_nothing_retry": "[再生成する訊息がありません]\n",
   "msg_busy_retry": "[只今処理中の返信をお待ちください]\n"
 }

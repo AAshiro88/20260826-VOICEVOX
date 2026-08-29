@@ -83,7 +83,12 @@
   "msg_tts_failed": "(Speech synthesis failed: {})\n",
   "role_user": "User",
   "btn_retry": "Retry",
+  "btn_retry_translate": "Re-translate",
   "msg_retrying": "[Regenerating…]\n",
+  "msg_retry_translate": "[Re-translating…]\n",
+  "msg_retry_translate_done": "[Translation updated]\n",
+  "msg_retry_translate_fail": "[Re-translation failed: {}]\n",
+  "msg_nothing_retry_translate": "[No reply to re-translate]\n",
   "msg_nothing_retry": "[Nothing to retry]\n",
   "msg_busy_retry": "[Wait for current reply]\n"
 }
