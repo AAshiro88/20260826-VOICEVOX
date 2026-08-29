@@ -817,6 +817,7 @@ class VoiceChatApp:
         # 日文回覆重播：標籤名稱 → 該則日文內容
         self.replay_seq = 0
         self.replay_texts = {}
+        self.replay_3d = {}  # 標籤名稱 → 該則回覆的 3D 指令（雙擊重播時一併送出）
         self.replay_hint_shown = False
         self.displayed_asst_count = 0
 
@@ -1011,11 +1012,17 @@ class VoiceChatApp:
         self.chat.see("end")
         self.chat.configure(state="disabled")
 
-    def _register_ai_message(self, conv, voice):
-        """顯示一則 AI 回覆；對話語言行在前，朗讀行（底線）可雙擊重播。"""
+    def _register_ai_message(self, conv, voice, cmds=None):
+        """顯示一則 AI 回覆；對話語言行在前，朗讀行（底線）可雙擊重播。
+
+        cmds 為該則回覆的 3D 指令清單，雙擊重播朗讀時一併送出，
+        讓歷史訊息的行為與當時 live 演出一致。
+        """
         self.replay_seq += 1
         tag = f"replay_{self.replay_seq}"
         self.replay_texts[tag] = voice
+        if isinstance(cmds, list) and cmds:
+            self.replay_3d[tag] = cmds
 
         self.chat.configure(state="normal")
         # 重播標籤只負責底線與滑鼠事件，顏色交給一般標籤
@@ -1062,7 +1069,9 @@ class VoiceChatApp:
                 if kind == "text":
                     self._append(msg[1], msg[2] if len(msg) > 2 else None)
                 elif kind == "ai_msg":
-                    self._register_ai_message(msg[1], msg[2])
+                    # msg：conv, voice, 3d 指令清單（可省略）
+                    cmds = msg[3] if len(msg) > 3 else None
+                    self._register_ai_message(msg[1], msg[2], cmds)
                 elif kind == "engine_ok":
                     self.engine_status.configure(text=msg[1], foreground="#1a7f37")
                 elif kind == "engine_ng":
@@ -1098,7 +1107,8 @@ class VoiceChatApp:
                     if msg[3] and msg[3] in msg[1]:
                         self.session_box.set(msg[3])
                 elif kind == "restore":
-                    self.handle_restore(msg[1], msg[2])
+                    # 啟動時自動還原最近對話：不觸發 3D 自動重播
+                    self.handle_restore(msg[1], msg[2], replay_3d=False)
                     # 只要歷史裡有內容（含呼叫失敗後留下的待重送訊息）就可以重新生成
                     self.retry_btn.configure(
                         state="disabled" if not self.history else "normal"
@@ -1496,8 +1506,12 @@ class VoiceChatApp:
 
     # ---------- 對話工作階段管理 ----------
 
-    def handle_restore(self, data, path_str):
-        """還原一個對話工作階段；data 為 None 時建立全新對話。"""
+    def handle_restore(self, data, path_str, replay_3d=True):
+        """還原一個對話工作階段；data 為 None 時建立全新對話。
+
+        replay_3d 為 False（啟動時自動還原最近對話）時不自動重播 3D 指令，
+        避免一開 app 模型就無故動起來；使用者手動切換對話時才重播。
+        """
         if not data:
             # 沒有聊天紀錄時維持空白畫面；必須由使用者按「開新對話」才建立檔案。
             self.current_session = None
@@ -1608,8 +1622,8 @@ class VoiceChatApp:
                 shown += 1
             elif role == "assistant":
                 conv, voice = reply_parts(content, session["lang"], m.get("voice"))
-                # 註冊成可雙擊重播的訊息（只顯示不朗讀）
-                self._register_ai_message(conv, voice)
+                # 註冊成可雙擊重播的訊息（只顯示不朗讀）；保留 3D 指令供雙擊時送出
+                self._register_ai_message(conv, voice, m.get("3d"))
                 shown += 1
 
         self._append(tr("msg_loaded").format(session["name"], shown), "sys")
@@ -1623,8 +1637,8 @@ class VoiceChatApp:
         if speaker_note:
             self._append(speaker_note, "sys")
 
-        # 載入歷史後，若啟用 3D 演出則依序重播累積的 3D 指令
-        if self.enable_3d_var.get():
+        # 載入歷史後，若啟用 3D 演出且是使用者主動切換對話，則依序重播累積的 3D 指令
+        if self.enable_3d_var.get() and replay_3d:
             threading.Thread(target=self._replay_3d_history, daemon=True).start()
 
     def _replay_3d_history(self):
@@ -2003,6 +2017,7 @@ class VoiceChatApp:
         self._clear_chat_display()
         self.displayed_asst_count = 0
         self.replay_texts.clear()
+        self.replay_3d.clear()
         self.replay_seq = 0
         self.replay_hint_shown = False
         for m in self.history:
@@ -2010,7 +2025,7 @@ class VoiceChatApp:
                 self._append(f"{tr('you_prefix')}{m['content']}\n", "user")
             elif m.get("role") == "assistant":
                 conv, voice = reply_parts(m["content"], self.convo_lang, m.get("voice"))
-                self._register_ai_message(conv, voice)
+                self._register_ai_message(conv, voice, m.get("3d"))
         self._append(tr("msg_retrying"), "sys")
         self._emit("busy", True)
         self.stop_requested = False
@@ -2054,7 +2069,7 @@ class VoiceChatApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def replay_message(self, tag):
-        """重新合成播放指定則 AI 回覆的朗讀內容。"""
+        """重新合成播放指定則 AI 回覆的朗讀內容；開啟 3D 時先重播該則的動作指令。"""
         voice = self.replay_texts.get(tag)
         if not voice or self.busy:
             if self.busy:
@@ -2068,8 +2083,19 @@ class VoiceChatApp:
         self.stop_requested = False
 
         def worker():
-            self.speak(voice)
-            self._emit("busy", False)
+            try:
+                if self.enable_3d_var.get():
+                    for c in self.replay_3d.get(tag, []):
+                        if not isinstance(c, dict) or not c.get("action"):
+                            continue
+                        action = c.get("action") or "reset"
+                        params = c.get("params") if isinstance(c.get("params"), dict) else {}
+                        send_3d_command(action, params)
+                        self._report_viewer_status()
+                        time.sleep(0.3)
+                self.speak(voice)
+            finally:
+                self._emit("busy", False)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2220,7 +2246,7 @@ class VoiceChatApp:
             assistant_message["voice"] = voice
         self.history.append(assistant_message)
         self.write_session_file()
-        self._emit("ai_msg", conv, voice)
+        self._emit("ai_msg", conv, voice, commands if commands else [])
 
         self.speak(voice)
 
