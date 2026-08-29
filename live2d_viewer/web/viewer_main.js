@@ -247,6 +247,81 @@ const MOTIONS = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// 層一：模型自帶 motion3 播放
+// ---------------------------------------------------------------------------
+// 本專案使用的第三方模型，其 .motion3.json 並非官方 SDK 的 [type,t,v] 段編碼
+// （分段標記與關鍵幀依序混排），官方 CubismMotion 無法直接解析。
+// 因此以寬鬆解碼抽出遞增時間的 (t, v) 關鍵幀序列，播放時以線性插值求值。
+function softDecodeSegments(seg) {
+  const pts = [{ t: seg[0], v: seg[1] }];
+  let i = 2;
+  const len = seg.length;
+  while (i < len) {
+    const x = seg[i];
+    // 0/1 是段界標記：若其後接著可維持時間單調的關鍵幀，即視作標記而略過
+    if ((x === 0 || x === 1) && i + 2 < len) {
+      const a = seg[i + 1];
+      if (!(a === 0 || a === 1) && a >= pts[pts.length - 1].t - 1e-9) {
+        i += 1;
+        continue;
+      }
+    }
+    if (i + 1 >= len) break;
+    pts.push({ t: seg[i], v: seg[i + 1] });
+    i += 2;
+  }
+  return pts;
+}
+
+function evalSegments(pts, t, loop, dur) {
+  if (loop && dur > 0) t = t % dur;
+  const last = pts[pts.length - 1];
+  if (t <= pts[0].t) return pts[0].v;
+  if (t >= last.t) return last.v;
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (t >= pts[i].t && t <= pts[i + 1].t) {
+      const span = pts[i + 1].t - pts[i].t || 1e-6;
+      return pts[i].v + (pts[i + 1].v - pts[i].v) * ((t - pts[i].t) / span);
+    }
+  }
+  return last.v;
+}
+
+// 指令 → 模型自帶動作的預設對應（依曲線 signature 推測，可於執行期微調）。
+// 值為 model3.json Motions 中 .motion3.json 的檔案主檔名；未列出者沿用合成動作。
+const MOTION_MAP = {
+  Hiyori: {
+    wave: 'Hiyori_m08',       // 2.1s，ArmB/HandB 大幅擺動＝揮手
+    point: 'Hiyori_m04',      // TapBody 群組＝點擊／指向
+    body_left: 'Hiyori_m06',  // 5.4s，雙臂 B 手部大幅動作
+    body_right: 'Hiyori_m10', // 4.2s，身體左右微傾配合手臂
+  },
+  Mao: {
+    wave: 'special_01', // 7.8s，右手臂 B＋右手大幅＝揮手
+    point: 'mtn_04',    // 4.2s，左臂 B 大幅
+    body_left: 'mtn_03',
+    body_right: 'special_02',
+  },
+};
+
+// ---------------------------------------------------------------------------
+// 層二：參數適配（模型綁定參數若與標準參數不同，改寫到真實綁定參數）
+// ---------------------------------------------------------------------------
+// 神宫白子（面饼）沒有 ParamBodyAngleX/Y/Z 與標準手部參數，
+// 身體與手部改用自訂參數：Param49/50/51＝身體 x/z/y，Param58/59/60＝左手 1/2/3，
+// Param69/70＝右手 1/2。寫入時將標準語意參數乘以增益後鏡射到綁定參數，
+// 避免指令寫入不存在的標準參數而完全沒有動作。
+const CHANNEL_ADAPTERS = {
+  '神宫白子': {
+    ParamBodyAngleX: [['Param49', 1.0]],
+    ParamBodyAngleY: [['Param50', 1.0]],
+    ParamBodyAngleZ: [['Param49', 1.0]],
+    ParamHandL: [['Param58', 1], ['Param59', 1], ['Param60', 1]],
+    ParamHandR: [['Param69', 1], ['Param70', 1]],
+  },
+};
+
 // 指令間的最小間隔（秒），避免多個指令一口氣全部播放
 const COMMAND_GAP = 0.35;
 
@@ -306,6 +381,14 @@ class ViewerModel extends CubismUserModel {
     this.currentMotion = null;   // {keys, dur, t, scale, pointAmp}
     this.motionHold = 0;         // 動作結束後的保持時間
 
+    // 層一：模型自帶動作
+    this.modelKey = null;          // 模型識別鍵（rel 第一段），用於 MOTION_MAP／適配表
+    this.nativeMotions = [];       // [{id, group, file, dur, loop, fadeIn, fadeOut, curves}]
+    this.nativeMotionsById = {};   // 檔案主檔名 → nativeMotions 索引
+    this.nativeMotion = null;      // 目前播放中 {data, t}
+    this.partOpacity = {};         // 原生動作寫入的零件透明度 name→值
+    this.partOpacityBase = {};     // 受影響零件的原透明度，結束時還原
+
     // 口型
     this.lipsyncActive = false;
     this.lipsyncLevel = 0;
@@ -324,6 +407,20 @@ class ViewerModel extends CubismUserModel {
   }
 
   setParam(name, value) {
+    if (!this._model) return;
+    // 層二：若此模型把標準語意參數鏡射到自訂綁定參數，改寫後再輸出
+    const adapter = this.modelKey ? CHANNEL_ADAPTERS[this.modelKey] : null;
+    const maps = adapter && adapter[name];
+    if (maps) {
+      for (const [target, gain] of maps) {
+        this._writeParam(target, value * gain);
+      }
+      return;
+    }
+    this._writeParam(name, value);
+  }
+
+  _writeParam(name, value) {
     if (!this._model) return;
     const id = pid(name);
     const index = this._model.getParameterIndex(id);
@@ -360,6 +457,10 @@ class ViewerModel extends CubismUserModel {
 
   applyMotionCmd(params) {
     const name = params && params.name;
+    // 層一：此模型若有對應的自帶動作，優先播放原生 motion3
+    if (name && this.startNativeMotion(name)) {
+      return;
+    }
     const def = name && MOTIONS[name];
     if (!def) return;
     this.currentMotion = {
@@ -376,6 +477,39 @@ class ViewerModel extends CubismUserModel {
     this.motionHold = 0;
   }
 
+  /* 依指令名稱啟動模型自帶動作；無對應動作時回傳 false */
+  startNativeMotion(name) {
+    const map =
+      this.modelKey && MOTION_MAP[this.modelKey] ? MOTION_MAP[this.modelKey] : null;
+    const key = map ? map[name] : null;
+    const idx = key != null ? this.nativeMotionsById[key] : -1;
+    if (idx < 0) return false;
+    const data = this.nativeMotions[idx];
+    // 先記錄零件原本透明度，動作結束時還原
+    for (const c of data.curves) {
+      if (c.target === 'PartOpacity') {
+        this.partOpacityBase[c.id] = this._model.getPartOpacityById(pid(c.id));
+      }
+    }
+    this.nativeMotion = { data, t: 0 };
+    this.currentMotion = null;
+    this.motionHold = 0;
+    this.exprSeqAtMotion = this.exprSeq;
+    return true;
+  }
+
+  _stopNativeMotion() {
+    if (this.partOpacity && this._model) {
+      for (const name of Object.keys(this.partOpacity)) {
+        const base = name in this.partOpacityBase ? this.partOpacityBase[name] : 1;
+        this._model.setPartOpacityById(pid(name), base);
+      }
+    }
+    this.nativeMotion = null;
+    this.partOpacity = {};
+    this.partOpacityBase = {};
+  }
+
   applyParameterCmd(params) {
     const idName = params && params.id;
     if (!idName || typeof idName !== 'string') return;
@@ -388,6 +522,7 @@ class ViewerModel extends CubismUserModel {
   stopCmds() {
     this.currentMotion = null;
     this.motionHold = 0;
+    this._stopNativeMotion();
   }
 
   resetAll() {
@@ -442,6 +577,7 @@ class ViewerModel extends CubismUserModel {
     if (this._pose) {
       this._pose.updateParameters(model, delta);
     }
+    this._applyPendingPartOpacity();
     model.update();
 
     // 整體縮放（特殊動作：無 Param157 時的轉換替代）
@@ -465,6 +601,11 @@ class ViewerModel extends CubismUserModel {
   }
 
   foldMotion(pending, delta) {
+    // 層一：原生動作優先於合成動作
+    if (this.nativeMotion) {
+      this._foldNativeMotion(pending, delta);
+      return;
+    }
     if (!this.currentMotion) {
       return;
     }
@@ -495,6 +636,45 @@ class ViewerModel extends CubismUserModel {
       if (this.exprSeq === this.exprSeqAtMotion && Object.keys(this.expression).length > 0) {
         this.autoNeutralPending = true;
       }
+    }
+  }
+
+  /* 原生 motion3 求值：線性插值、淡入淡出、結束時還原零件透明度 */
+  _foldNativeMotion(pending, delta) {
+    const m = this.nativeMotion;
+    const d = m.data;
+    m.t += delta;
+    const t = m.t;
+    const dur = d.dur;
+
+    // 淡入／淡出增益（於 fade 秒內線性收斂）
+    let gain = 1;
+    if (t < d.fadeIn) gain = Math.max(0.0001, t / d.fadeIn);
+    const fadeOutStart = dur - d.fadeOut;
+    if (t > fadeOutStart) gain = Math.max(0, (dur - t) / d.fadeOut);
+
+    for (const c of d.curves) {
+      const v = evalSegments(c.pts, Math.min(t, dur), false, dur);
+      if (c.target === 'PartOpacity') {
+        this.partOpacity[c.id] = clamp(v * gain, 0, 1);
+      } else {
+        pending[c.id] = v * gain;
+      }
+    }
+
+    if (t >= dur) {
+      this._stopNativeMotion();
+      // 動作結束後自動還原中性表情（同合成動作）
+      if (this.exprSeq === this.exprSeqAtMotion && Object.keys(this.expression).length > 0) {
+        this.autoNeutralPending = true;
+      }
+    }
+  }
+
+  /* 在 pose 之後套用原生動作的零件透明度，確保零件切換不會被 pose 覆寫 */
+  _applyPendingPartOpacity() {
+    for (const name of Object.keys(this.partOpacity)) {
+      this._model.setPartOpacityById(pid(name), this.partOpacity[name]);
     }
   }
 
@@ -683,6 +863,7 @@ class ViewerApp {
       const dir = rel.slice(0, rel.lastIndexOf('/') + 1);
 
       const userModel = new ViewerModel();
+      userModel.modelKey = rel.split('/')[0];
       userModel.autoBreath = this.autoBreath;
       userModel.autoBlink = this.autoBlink;
       const mocBuffer = await this._fetchArrayBuffer(
@@ -753,6 +934,9 @@ class ViewerApp {
       await this._setupTextures(userModel, setting, dir);
       userModel.setting = setting;
 
+      // 層一：載入 model3.json Motions 指定的原生動作曲線
+      await this._loadNativeMotions(userModel, setting, dir);
+
       this.userModel = userModel;
       this.modelRel = rel;
       this._hideOverlay();
@@ -769,6 +953,50 @@ class ViewerApp {
       throw new Error(`HTTP ${res.status} ${url}`);
     }
     return res.arrayBuffer();
+  }
+
+  /* 載入模型自帶的 motion3：解析曲線並以檔案主檔名建立索引 */
+  async _loadNativeMotions(userModel, setting, dir) {
+    userModel.nativeMotions = [];
+    userModel.nativeMotionsById = {};
+    const groupCount = setting.getMotionGroupCount();
+    for (let g = 0; g < groupCount; g++) {
+      const group = setting.getMotionGroupName(g);
+      const count = setting.getMotionCount(group);
+      for (let i = 0; i < count; i++) {
+        const file = setting.getMotionFileName(group, i);
+        try {
+          const buf = await this._fetchArrayBuffer(`/model/${encRel(dir)}${encFile(file)}`);
+          const json = JSON.parse(new TextDecoder().decode(buf));
+          const meta = json.Meta || {};
+          const id = (file.split('/').pop() || file).replace(/\.motion3\.json$/i, '');
+          const rec = {
+            id,
+            group,
+            file,
+            dur: Number(meta.Duration) > 0 ? Number(meta.Duration) : 1,
+            loop: !!meta.Loop,
+            fadeIn:
+              Number(setting.getMotionFadeInTimeValue(group, i)) > 0
+                ? Number(setting.getMotionFadeInTimeValue(group, i))
+                : 0.3,
+            fadeOut:
+              Number(setting.getMotionFadeOutTimeValue(group, i)) > 0
+                ? Number(setting.getMotionFadeOutTimeValue(group, i))
+                : 0.3,
+            curves: (json.Curves || []).map((c) => ({
+              id: c.Id,
+              target: c.Target,
+              pts: softDecodeSegments(c.Segments || []),
+            })),
+          };
+          userModel.nativeMotions.push(rec);
+          userModel.nativeMotionsById[id] = userModel.nativeMotions.length - 1;
+        } catch (err) {
+          console.warn('原生動作載入失敗：', group, i, file, err);
+        }
+      }
+    }
   }
 
   async _setupTextures(userModel, setting, dir) {
@@ -1132,7 +1360,7 @@ CubismFramework.startUp();
 CubismFramework.initialize();
 
 // bundle 版本標記：重新整理後若看不到此版號，代表頁面仍在使用舊版 JavaScript
-const BUILD_TAG = 'build-20260829-1125';
+const BUILD_TAG = 'build-20260830-0900';
 const verEl = document.getElementById('bundle-ver');
 if (verEl) {
   verEl.textContent = BUILD_TAG;

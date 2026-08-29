@@ -14972,6 +14972,67 @@
       transform: { shrinkScale: 0.7, start: 0.3, end: 0.9 }
     }
   };
+  function softDecodeSegments(seg) {
+    const pts = [{ t: seg[0], v: seg[1] }];
+    let i = 2;
+    const len = seg.length;
+    while (i < len) {
+      const x = seg[i];
+      if ((x === 0 || x === 1) && i + 2 < len) {
+        const a = seg[i + 1];
+        if (!(a === 0 || a === 1) && a >= pts[pts.length - 1].t - 1e-9) {
+          i += 1;
+          continue;
+        }
+      }
+      if (i + 1 >= len) break;
+      pts.push({ t: seg[i], v: seg[i + 1] });
+      i += 2;
+    }
+    return pts;
+  }
+  function evalSegments(pts, t, loop, dur) {
+    if (loop && dur > 0) t = t % dur;
+    const last = pts[pts.length - 1];
+    if (t <= pts[0].t) return pts[0].v;
+    if (t >= last.t) return last.v;
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (t >= pts[i].t && t <= pts[i + 1].t) {
+        const span = pts[i + 1].t - pts[i].t || 1e-6;
+        return pts[i].v + (pts[i + 1].v - pts[i].v) * ((t - pts[i].t) / span);
+      }
+    }
+    return last.v;
+  }
+  var MOTION_MAP = {
+    Hiyori: {
+      wave: "Hiyori_m08",
+      // 2.1s，ArmB/HandB 大幅擺動＝揮手
+      point: "Hiyori_m04",
+      // TapBody 群組＝點擊／指向
+      body_left: "Hiyori_m06",
+      // 5.4s，雙臂 B 手部大幅動作
+      body_right: "Hiyori_m10"
+      // 4.2s，身體左右微傾配合手臂
+    },
+    Mao: {
+      wave: "special_01",
+      // 7.8s，右手臂 B＋右手大幅＝揮手
+      point: "mtn_04",
+      // 4.2s，左臂 B 大幅
+      body_left: "mtn_03",
+      body_right: "special_02"
+    }
+  };
+  var CHANNEL_ADAPTERS = {
+    "\u795E\u5BAB\u767D\u5B50": {
+      ParamBodyAngleX: [["Param49", 1]],
+      ParamBodyAngleY: [["Param50", 1]],
+      ParamBodyAngleZ: [["Param49", 1]],
+      ParamHandL: [["Param58", 1], ["Param59", 1], ["Param60", 1]],
+      ParamHandR: [["Param69", 1], ["Param70", 1]]
+    }
+  };
   var COMMAND_GAP = 0.35;
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
@@ -15013,6 +15074,12 @@
       this.held = {};
       this.currentMotion = null;
       this.motionHold = 0;
+      this.modelKey = null;
+      this.nativeMotions = [];
+      this.nativeMotionsById = {};
+      this.nativeMotion = null;
+      this.partOpacity = {};
+      this.partOpacityBase = {};
       this.lipsyncActive = false;
       this.lipsyncLevel = 0;
       this.lipsyncTick = 0;
@@ -15026,6 +15093,18 @@
       }
     }
     setParam(name, value) {
+      if (!this._model) return;
+      const adapter = this.modelKey ? CHANNEL_ADAPTERS[this.modelKey] : null;
+      const maps = adapter && adapter[name];
+      if (maps) {
+        for (const [target, gain] of maps) {
+          this._writeParam(target, value * gain);
+        }
+        return;
+      }
+      this._writeParam(name, value);
+    }
+    _writeParam(name, value) {
       if (!this._model) return;
       const id = pid(name);
       const index = this._model.getParameterIndex(id);
@@ -15057,6 +15136,9 @@
     }
     applyMotionCmd(params) {
       const name = params && params.name;
+      if (name && this.startNativeMotion(name)) {
+        return;
+      }
       const def = name && MOTIONS[name];
       if (!def) return;
       this.currentMotion = {
@@ -15070,6 +15152,35 @@
       this.exprSeqAtMotion = this.exprSeq;
       this.motionHold = 0;
     }
+    /* 依指令名稱啟動模型自帶動作；無對應動作時回傳 false */
+    startNativeMotion(name) {
+      const map = this.modelKey && MOTION_MAP[this.modelKey] ? MOTION_MAP[this.modelKey] : null;
+      const key = map ? map[name] : null;
+      const idx = key != null ? this.nativeMotionsById[key] : -1;
+      if (idx < 0) return false;
+      const data = this.nativeMotions[idx];
+      for (const c of data.curves) {
+        if (c.target === "PartOpacity") {
+          this.partOpacityBase[c.id] = this._model.getPartOpacityById(pid(c.id));
+        }
+      }
+      this.nativeMotion = { data, t: 0 };
+      this.currentMotion = null;
+      this.motionHold = 0;
+      this.exprSeqAtMotion = this.exprSeq;
+      return true;
+    }
+    _stopNativeMotion() {
+      if (this.partOpacity && this._model) {
+        for (const name of Object.keys(this.partOpacity)) {
+          const base = name in this.partOpacityBase ? this.partOpacityBase[name] : 1;
+          this._model.setPartOpacityById(pid(name), base);
+        }
+      }
+      this.nativeMotion = null;
+      this.partOpacity = {};
+      this.partOpacityBase = {};
+    }
     applyParameterCmd(params) {
       const idName = params && params.id;
       if (!idName || typeof idName !== "string") return;
@@ -15081,6 +15192,7 @@
     stopCmds() {
       this.currentMotion = null;
       this.motionHold = 0;
+      this._stopNativeMotion();
     }
     resetAll() {
       this.stopCmds();
@@ -15121,6 +15233,7 @@
       if (this._pose) {
         this._pose.updateParameters(model, delta);
       }
+      this._applyPendingPartOpacity();
       model.update();
       return this.effectiveScale;
     }
@@ -15139,6 +15252,10 @@
       }
     }
     foldMotion(pending, delta) {
+      if (this.nativeMotion) {
+        this._foldNativeMotion(pending, delta);
+        return;
+      }
       if (!this.currentMotion) {
         return;
       }
@@ -15166,6 +15283,38 @@
         if (this.exprSeq === this.exprSeqAtMotion && Object.keys(this.expression).length > 0) {
           this.autoNeutralPending = true;
         }
+      }
+    }
+    /* 原生 motion3 求值：線性插值、淡入淡出、結束時還原零件透明度 */
+    _foldNativeMotion(pending, delta) {
+      const m = this.nativeMotion;
+      const d = m.data;
+      m.t += delta;
+      const t = m.t;
+      const dur = d.dur;
+      let gain = 1;
+      if (t < d.fadeIn) gain = Math.max(1e-4, t / d.fadeIn);
+      const fadeOutStart = dur - d.fadeOut;
+      if (t > fadeOutStart) gain = Math.max(0, (dur - t) / d.fadeOut);
+      for (const c of d.curves) {
+        const v = evalSegments(c.pts, Math.min(t, dur), false, dur);
+        if (c.target === "PartOpacity") {
+          this.partOpacity[c.id] = clamp(v * gain, 0, 1);
+        } else {
+          pending[c.id] = v * gain;
+        }
+      }
+      if (t >= dur) {
+        this._stopNativeMotion();
+        if (this.exprSeq === this.exprSeqAtMotion && Object.keys(this.expression).length > 0) {
+          this.autoNeutralPending = true;
+        }
+      }
+    }
+    /* 在 pose 之後套用原生動作的零件透明度，確保零件切換不會被 pose 覆寫 */
+    _applyPendingPartOpacity() {
+      for (const name of Object.keys(this.partOpacity)) {
+        this._model.setPartOpacityById(pid(name), this.partOpacity[name]);
       }
     }
     foldLipsync(pending, delta) {
@@ -15324,6 +15473,7 @@ ${err}`);
         );
         const dir = rel.slice(0, rel.lastIndexOf("/") + 1);
         const userModel = new ViewerModel();
+        userModel.modelKey = rel.split("/")[0];
         userModel.autoBreath = this.autoBreath;
         userModel.autoBlink = this.autoBlink;
         const mocBuffer = await this._fetchArrayBuffer(
@@ -15379,6 +15529,7 @@ ${err}`);
         userModel.getRenderer().setIsPremultipliedAlpha(true);
         await this._setupTextures(userModel, setting, dir);
         userModel.setting = setting;
+        await this._loadNativeMotions(userModel, setting, dir);
         this.userModel = userModel;
         this.modelRel = rel;
         this._hideOverlay();
@@ -15397,6 +15548,43 @@ ${err || "\u672A\u77E5\u932F\u8AA4"}
         throw new Error(`HTTP ${res.status} ${url}`);
       }
       return res.arrayBuffer();
+    }
+    /* 載入模型自帶的 motion3：解析曲線並以檔案主檔名建立索引 */
+    async _loadNativeMotions(userModel, setting, dir) {
+      userModel.nativeMotions = [];
+      userModel.nativeMotionsById = {};
+      const groupCount = setting.getMotionGroupCount();
+      for (let g = 0; g < groupCount; g++) {
+        const group = setting.getMotionGroupName(g);
+        const count = setting.getMotionCount(group);
+        for (let i = 0; i < count; i++) {
+          const file = setting.getMotionFileName(group, i);
+          try {
+            const buf = await this._fetchArrayBuffer(`/model/${encRel(dir)}${encFile(file)}`);
+            const json = JSON.parse(new TextDecoder().decode(buf));
+            const meta = json.Meta || {};
+            const id = (file.split("/").pop() || file).replace(/\.motion3\.json$/i, "");
+            const rec = {
+              id,
+              group,
+              file,
+              dur: Number(meta.Duration) > 0 ? Number(meta.Duration) : 1,
+              loop: !!meta.Loop,
+              fadeIn: Number(setting.getMotionFadeInTimeValue(group, i)) > 0 ? Number(setting.getMotionFadeInTimeValue(group, i)) : 0.3,
+              fadeOut: Number(setting.getMotionFadeOutTimeValue(group, i)) > 0 ? Number(setting.getMotionFadeOutTimeValue(group, i)) : 0.3,
+              curves: (json.Curves || []).map((c) => ({
+                id: c.Id,
+                target: c.Target,
+                pts: softDecodeSegments(c.Segments || [])
+              }))
+            };
+            userModel.nativeMotions.push(rec);
+            userModel.nativeMotionsById[id] = userModel.nativeMotions.length - 1;
+          } catch (err) {
+            console.warn("\u539F\u751F\u52D5\u4F5C\u8F09\u5165\u5931\u6557\uFF1A", group, i, file, err);
+          }
+        }
+      }
     }
     async _setupTextures(userModel, setting, dir) {
       const renderer = userModel.getRenderer();
@@ -15716,7 +15904,7 @@ ${err || "\u672A\u77E5\u932F\u8AA4"}
   var canvas = document.getElementById("canvas");
   CubismFramework.startUp();
   CubismFramework.initialize();
-  var BUILD_TAG = "build-20260829-1125";
+  var BUILD_TAG = "build-20260830-0900";
   var verEl = document.getElementById("bundle-ver");
   if (verEl) {
     verEl.textContent = BUILD_TAG;
