@@ -14768,6 +14768,19 @@
     }
     return pidCache[name];
   }
+  var SWITCH_PARAMS = ["Param91", "Param92", "Param93", "Param94"];
+  var SWITCH_RESET = {};
+  for (const s of SWITCH_PARAMS) SWITCH_RESET[s] = 0;
+  var FACIAL_RESET = {
+    [P.ParamBrowLY]: 0,
+    [P.ParamBrowRY]: 0,
+    [P.ParamBrowLAngle]: 0,
+    [P.ParamBrowRAngle]: 0,
+    [P.ParamEyeLSmile]: 0,
+    [P.ParamEyeRSmile]: 0,
+    [P.ParamMouthForm]: 0,
+    [P.ParamMouthOpenY]: 0
+  };
   var EXPRESSIONS = {
     neutral: {},
     happy: {
@@ -14780,6 +14793,7 @@
     },
     angry: {
       "Param104": 1,
+      "Param92": 1,
       [P.ParamBrowLY]: -0.4,
       [P.ParamBrowRY]: -0.4,
       [P.ParamMouthForm]: 0.4,
@@ -14819,6 +14833,7 @@
       [P.ParamEyeROpen]: 0.5
     },
     blush: {
+      "Param91": 1,
       [P.ParamBrowLY]: 0.2,
       [P.ParamBrowRY]: 0.2,
       [P.ParamMouthForm]: 0.3,
@@ -14842,6 +14857,7 @@
       [P.ParamMouthForm]: 0.1
     },
     smug: {
+      "Param93": 1,
       [P.ParamBrowLY]: 0.3,
       [P.ParamBrowRY]: 0,
       [P.ParamMouthForm]: 0.7,
@@ -14991,6 +15007,9 @@
       this.setting = null;
       this.layerOrder = null;
       this.expression = {};
+      this.exprSeq = 0;
+      this.exprSeqAtMotion = 0;
+      this.autoNeutralPending = false;
       this.held = {};
       this.currentMotion = null;
       this.motionHold = 0;
@@ -15025,9 +15044,15 @@
     /* 指令處理 */
     applyExpressionCmd(params) {
       const name = params && params.name;
-      this.expression = {};
+      this.exprSeq += 1;
+      this.expression = Object.assign({}, SWITCH_RESET);
       if (name && EXPRESSIONS[name]) {
-        this.expression = { ...EXPRESSIONS[name] };
+        Object.assign(this.expression, EXPRESSIONS[name]);
+      }
+      for (const key of Object.keys(FACIAL_RESET)) {
+        if (!(key in this.expression)) {
+          this.setParam(key, FACIAL_RESET[key]);
+        }
       }
     }
     applyMotionCmd(params) {
@@ -15042,6 +15067,7 @@
         scaleTo: def.transform ? def.transform.shrinkScale : 1,
         transform: def.transform || null
       };
+      this.exprSeqAtMotion = this.exprSeq;
       this.motionHold = 0;
     }
     applyParameterCmd(params) {
@@ -15058,7 +15084,8 @@
     }
     resetAll() {
       this.stopCmds();
-      this.expression = {};
+      this.expression = Object.assign({}, SWITCH_RESET);
+      this.setParams(FACIAL_RESET);
       this.held = {};
       this.lipsyncLevel = 0;
       this.lipsyncActive = false;
@@ -15067,6 +15094,12 @@
     updateFrame(delta, time) {
       const model = this._model;
       if (!model) return;
+      if (this.autoNeutralPending) {
+        this.autoNeutralPending = false;
+        if (this.exprSeq === this.exprSeqAtMotion && Object.keys(this.expression).length > 0) {
+          this.applyExpressionCmd({ name: "neutral" });
+        }
+      }
       if (this._eyeBlink && this.autoBlink) {
         this._eyeBlink.updateParameters(model, delta);
       }
@@ -15081,10 +15114,10 @@
       this.foldHeld(pending, delta);
       this.foldMotion(pending, delta);
       this.foldLipsync(pending, delta);
-      this._applyPending(pending);
       if (this._physics) {
         this._physics.evaluate(model, delta);
       }
+      this._applyPending(pending);
       if (this._pose) {
         this._pose.updateParameters(model, delta);
       }
@@ -15130,6 +15163,9 @@
       }
       if (t >= m.dur) {
         this.currentMotion = null;
+        if (this.exprSeq === this.exprSeqAtMotion && Object.keys(this.expression).length > 0) {
+          this.autoNeutralPending = true;
+        }
       }
     }
     foldLipsync(pending, delta) {

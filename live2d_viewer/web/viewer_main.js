@@ -32,6 +32,25 @@ function pid(name) {
 // ---------------------------------------------------------------------------
 // 表情預設表：paramName → 目標值（0..1 或實際座標域）
 // ---------------------------------------------------------------------------
+// 部分第三方模型以「零件開關」呈現害羞、生氣等表情（物理無法覆寫開關層）。
+// 具備這些參數的模型會直接開啟對應開關；其他模型沒有這些參數，套用時自動忽略。
+const SWITCH_PARAMS = ['Param91', 'Param92', 'Param93', 'Param94'];
+const SWITCH_RESET = {};
+for (const s of SWITCH_PARAMS) SWITCH_RESET[s] = 0;
+
+// 切換表情時需要歸零的標準表情參數（一次性套用，之後交給物理自然接管）。
+// 不包含眼皮（避免干擾眨眼）與頭部／眼球角度（避免干擾視線跟隨、動作）。
+const FACIAL_RESET = {
+  [P.ParamBrowLY]: 0,
+  [P.ParamBrowRY]: 0,
+  [P.ParamBrowLAngle]: 0,
+  [P.ParamBrowRAngle]: 0,
+  [P.ParamEyeLSmile]: 0,
+  [P.ParamEyeRSmile]: 0,
+  [P.ParamMouthForm]: 0,
+  [P.ParamMouthOpenY]: 0,
+};
+
 const EXPRESSIONS = {
   neutral: {},
   happy: {
@@ -44,6 +63,7 @@ const EXPRESSIONS = {
   },
   angry: {
     'Param104': 1.0,
+    'Param92': 1.0,
     [P.ParamBrowLY]: -0.4,
     [P.ParamBrowRY]: -0.4,
     [P.ParamMouthForm]: 0.4,
@@ -83,6 +103,7 @@ const EXPRESSIONS = {
     [P.ParamEyeROpen]: 0.5,
   },
   blush: {
+    'Param91': 1.0,
     [P.ParamBrowLY]: 0.2,
     [P.ParamBrowRY]: 0.2,
     [P.ParamMouthForm]: 0.3,
@@ -106,6 +127,7 @@ const EXPRESSIONS = {
     [P.ParamMouthForm]: 0.1,
   },
   smug: {
+    'Param93': 1.0,
     [P.ParamBrowLY]: 0.3,
     [P.ParamBrowRY]: 0.0,
     [P.ParamMouthForm]: 0.7,
@@ -273,6 +295,9 @@ class ViewerModel extends CubismUserModel {
 
     // 表情層：paramName → 目標值（持續套用）
     this.expression = {};
+    this.exprSeq = 0;        // 表情指令序號：動作結束時用於判斷是否該自動還原
+    this.exprSeqAtMotion = 0;
+    this.autoNeutralPending = false;
 
     // 參數指令層：paramName → {from, to, start, dur}（過渡到目標後持續保持）
     this.held = {};
@@ -319,9 +344,17 @@ class ViewerModel extends CubismUserModel {
   /* 指令處理 */
   applyExpressionCmd(params) {
     const name = params && params.name;
-    this.expression = {};
+    this.exprSeq += 1;
+    // 先以 SWITCH_RESET 清空全部零件開關，再套用目標表情，避免開關殘留
+    this.expression = Object.assign({}, SWITCH_RESET);
     if (name && EXPRESSIONS[name]) {
-      this.expression = { ...EXPRESSIONS[name] };
+      Object.assign(this.expression, EXPRESSIONS[name]);
+    }
+    // 一次性歸零「未被新表情覆寫」的標準表情參數，避免前一表情殘留
+    for (const key of Object.keys(FACIAL_RESET)) {
+      if (!(key in this.expression)) {
+        this.setParam(key, FACIAL_RESET[key]);
+      }
     }
   }
 
@@ -337,6 +370,8 @@ class ViewerModel extends CubismUserModel {
       scaleTo: def.transform ? def.transform.shrinkScale : 1.0,
       transform: def.transform || null,
     };
+    // 記錄動作開始時的表情序號，供動作結束後判斷是否要自動還原表情
+    this.exprSeqAtMotion = this.exprSeq;
     // 動作重新開始，不需要舊層殘留
     this.motionHold = 0;
   }
@@ -357,7 +392,8 @@ class ViewerModel extends CubismUserModel {
 
   resetAll() {
     this.stopCmds();
-    this.expression = {};
+    this.expression = Object.assign({}, SWITCH_RESET);
+    this.setParams(FACIAL_RESET);
     this.held = {};
     this.lipsyncLevel = 0;
     this.lipsyncActive = false;
@@ -367,6 +403,15 @@ class ViewerModel extends CubismUserModel {
   updateFrame(delta, time) {
     const model = this._model;
     if (!model) return;
+
+    // 動作結束後自動還原中性表情：延後到幀開頭執行，
+    // 避免同幀 foldExpression 已用舊表情建好 pending 並在最後覆蓋還原值。
+    if (this.autoNeutralPending) {
+      this.autoNeutralPending = false;
+      if (this.exprSeq === this.exprSeqAtMotion && Object.keys(this.expression).length > 0) {
+        this.applyExpressionCmd({ name: 'neutral' });
+      }
+    }
 
     // 基礎效果：眨眼、呼吸、視線跟隨（可個別關閉避免角色自動扭動）
     if (this._eyeBlink && this.autoBlink) {
@@ -386,12 +431,12 @@ class ViewerModel extends CubismUserModel {
     this.foldMotion(pending, delta);
     this.foldLipsync(pending, delta);
 
-    // 套用後再交給物理演算與 model.update
-    this._applyPending(pending);
-
+    // 先交給物理演算，再用指令層覆蓋，確保表情／動作／口型不被物理還原
     if (this._physics) {
       this._physics.evaluate(model, delta);
     }
+
+    this._applyPending(pending);
 
     // 姿勢（Pose）：更新零件透明度，與參數演算分離
     if (this._pose) {
@@ -445,6 +490,11 @@ class ViewerModel extends CubismUserModel {
     }
     if (t >= m.dur) {
       this.currentMotion = null;
+      // 動作結束後自動還原為中性表情，避免角色一直維持最後一個表情。
+      // 只在動作進行期間表情沒有被改動過時才還原，不覆蓋新到達的表情指令。
+      if (this.exprSeq === this.exprSeqAtMotion && Object.keys(this.expression).length > 0) {
+        this.autoNeutralPending = true;
+      }
     }
   }
 

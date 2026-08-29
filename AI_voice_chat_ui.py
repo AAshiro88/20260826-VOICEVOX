@@ -1630,20 +1630,38 @@ class VoiceChatApp:
     def _replay_3d_history(self):
         """載入歷史對話後，依序重播每則回覆累積的 3D 指令。
 
-        只在「啟用 3D 演出」勾選時呼叫；指令間隔 1 秒讓動作確實演出，
-        檢視器未連線時指令自然失敗略過。
+        每則回覆的指令連續送出（表情與動作大致同時演出），
+        之後暫停數秒讓動作完整播放，再繼續下一則；結束後還原為中性表情。
+        檢視器未連線時指令自然失敗略過；重播進行中重複觸發會被略過。
         """
-        for m in self.history:
-            cmds = m.get("3d") if isinstance(m, dict) else None
-            if not isinstance(cmds, list):
-                continue
-            for c in cmds:
-                if not isinstance(c, dict) or not c.get("action"):
+        lock = getattr(self, "_replay_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._replay_lock = lock
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            # 先還原殘留狀態，避免上一次演出停在半途
+            send_3d_command("reset")
+            time.sleep(0.4)
+            for m in self.history:
+                cmds = m.get("3d") if isinstance(m, dict) else None
+                if not isinstance(cmds, list):
                     continue
-                params = c.get("params") if isinstance(c.get("params"), dict) else {}
-                send_3d_command(c["action"], params)
-                self._report_viewer_status()
-                time.sleep(1.0)
+                for c in cmds:
+                    if not isinstance(c, dict) or not c.get("action"):
+                        continue
+                    params = c.get("params") if isinstance(c.get("params"), dict) else {}
+                    send_3d_command(c["action"], params)
+                    self._report_viewer_status()
+                    time.sleep(0.4)
+                time.sleep(1.6)
+            send_3d_command("expression", {"name": "neutral"})
+            self._report_viewer_status()
+        finally:
+            lock.release()
+
+    def write_session_file(self):
         """將目前對話（含當下聲音、服務、模型、角色）寫入磁檔。"""
         if self.current_session is None or self.current_path is None:
             return
