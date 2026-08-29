@@ -392,6 +392,11 @@ class ViewerModel extends CubismUserModel {
     if (this._physics) {
       this._physics.evaluate(model, delta);
     }
+
+    // 姿勢（Pose）：更新零件透明度，與參數演算分離
+    if (this._pose) {
+      this._pose.updateParameters(model, delta);
+    }
     model.update();
 
     // 整體縮放（特殊動作：無 Param157 時的轉換替代）
@@ -452,10 +457,11 @@ class ViewerModel extends CubismUserModel {
     }
     this.lipsyncTick += delta;
     const base = this.expression['ParamMouthOpenY'] || 0;
-    const waveA = 0.5 + 0.5 * Math.sin(this.lipsyncTick * 16);
-    const waveB = 0.5 + 0.5 * Math.sin(this.lipsyncTick * 37 + 1.7);
-    const amp = 0.35 + 0.6 * Math.max(waveA * 0.7, waveB * 0.5, 0.15);
-    pending['ParamMouthOpenY'] = Math.max(base, clamp(base + amp * this.lipsyncLevel, 0, 1));
+    const wave =
+      0.5 +
+      0.5 * Math.max(Math.sin(this.lipsyncTick * 9), Math.sin(this.lipsyncTick * 17 + 1.7));
+    const amp = 0.18 * this.lipsyncLevel;
+    pending['ParamMouthOpenY'] = Math.max(base, clamp(base + amp * wave, 0, 1));
   }
 
   _applyPending(pending) {
@@ -641,6 +647,15 @@ class ViewerApp {
           `/model/${encRel(dir)}${encFile(physicsFile)}`
         );
         userModel.loadPhysics(physBuffer, physBuffer.byteLength);
+      }
+
+      // 姿勢（Pose）：切換手臂等零件組，避免模型同時顯示多組零件
+      const poseFile = setting.getPoseFileName();
+      if (poseFile) {
+        const poseBuffer = await this._fetchArrayBuffer(
+          `/model/${encRel(dir)}${encFile(poseFile)}`
+        );
+        userModel.loadPose(poseBuffer, poseBuffer.byteLength);
       }
 
       // 呼吸

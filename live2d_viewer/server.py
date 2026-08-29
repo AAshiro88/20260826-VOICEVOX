@@ -147,12 +147,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, obj, status=200):
         body = json_bytes(obj)
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionError, OSError):
+            pass  # 瀏覽器中途關閉連線時靜默，不噴 traceback
 
     def _send_file(self, path, status=200):
         try:
@@ -160,21 +163,27 @@ class ViewerHandler(BaseHTTPRequestHandler):
         except Exception:
             self._send_json({"error": "not found"}, status=404)
             return
-        self.send_response(status)
-        self.send_header("Content-Type", mime_of(path))
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", mime_of(path))
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+        except (ConnectionError, OSError):
+            pass  # 瀏覽器中途關閉連線時靜默，不噴 traceback
 
     def _send_text(self, text, status=200):
         body = text.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionError, OSError):
+            pass  # 瀏覽器中途關閉連線時靜默，不噴 traceback
 
     # -- 路由 --------------------------------------------------------------
 

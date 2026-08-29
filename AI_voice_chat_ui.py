@@ -646,18 +646,42 @@ def migrate_assistant_voices(history, lang):
     return changed, errors
 
 
-def llm_view(history, lang):
+def llm_view(history, lang, include_stage=True):
     """產生送給模型的歷史視圖（不更動原始資料）。
 
     assistant 訊息只保留對話語言的內容以節省 token；
     user 與 system（摘要）訊息原樣保留。
+    include_stage 為 True 時，把各則回覆的 3d 欄位重組成 [3d] JSON 區塊
+    附加在文字尾端，作為模型輸出 3D 指令的範例（不會寫回歷史）。
     """
+    def stage_text(msg):
+        if not include_stage:
+            return ""
+        cmds = msg.get("3d")
+        if not isinstance(cmds, list):
+            return ""
+        blocks = []
+        for c in cmds:
+            if not isinstance(c, dict) or not c.get("action"):
+                continue
+            try:
+                blocks.append(
+                    "[3d]"
+                    + json.dumps(c, ensure_ascii=False, separators=(",", ":"))
+                    + "[/3d]"
+                )
+            except Exception:
+                continue
+        return ("\n" + "\n".join(blocks)) if blocks else ""
+
     view = []
     for m in history:
         if isinstance(m, dict) and m.get("role") == "assistant":
             conv = assistant_conv_text(str(m.get("content", "")), lang)
             if conv:
-                view.append({"role": "assistant", "content": conv})
+                view.append(
+                    {"role": "assistant", "content": conv + stage_text(m)}
+                )
                 continue
         view.append(m)
     return view
@@ -832,6 +856,10 @@ class VoiceChatApp:
         key_hint = tr("key_loaded") if OPENROUTER_API_KEY else tr("key_missing")
         self.or_status = ttk.Label(top, text=(tr("checking") if OPENROUTER_API_KEY else key_hint), foreground="#b26a00")
         self.or_status.pack(side="left")
+
+        ttk.Label(top, text=tr("status_viewer")).pack(side="left", padx=(16, 0))
+        self.viewer_status = ttk.Label(top, text=tr("checking"), foreground="#b26a00")
+        self.viewer_status.pack(side="left")
 
         mid = ttk.Frame(self.root, padding=(6, 0))
         mid.pack(fill="x")
@@ -1047,6 +1075,10 @@ class VoiceChatApp:
                     self.or_status.configure(text=msg[1], foreground="#1a7f37")
                 elif kind == "or_ng":
                     self.or_status.configure(text=msg[1], foreground="#c62828")
+                elif kind == "viewer3d_ok":
+                    self.viewer_status.configure(text=msg[1], foreground="#1a7f37")
+                elif kind == "viewer3d_ng":
+                    self.viewer_status.configure(text=msg[1], foreground="#c62828")
                 elif kind == "voices":
                     self._load_voices(msg[1])
                 elif kind == "style_translations":
@@ -1189,6 +1221,8 @@ class VoiceChatApp:
         select = names[0] if pairs else None
         self._emit("sessions", names, paths, select)
         self._emit("restore", latest[0] if latest else None, latest[1] if latest else None)
+        # 開機後更新一次 3D 檢視器狀態燈（之後依實際送指令結果變換）
+        self._report_viewer_status()
 
     def _collect_voices(self, speakers):
         """組出角色清單，每個角色含其風格子清單。
@@ -1589,7 +1623,27 @@ class VoiceChatApp:
         if speaker_note:
             self._append(speaker_note, "sys")
 
-    def write_session_file(self):
+        # 載入歷史後，若啟用 3D 演出則依序重播累積的 3D 指令
+        if self.enable_3d_var.get():
+            threading.Thread(target=self._replay_3d_history, daemon=True).start()
+
+    def _replay_3d_history(self):
+        """載入歷史對話後，依序重播每則回覆累積的 3D 指令。
+
+        只在「啟用 3D 演出」勾選時呼叫；指令間隔 1 秒讓動作確實演出，
+        檢視器未連線時指令自然失敗略過。
+        """
+        for m in self.history:
+            cmds = m.get("3d") if isinstance(m, dict) else None
+            if not isinstance(cmds, list):
+                continue
+            for c in cmds:
+                if not isinstance(c, dict) or not c.get("action"):
+                    continue
+                params = c.get("params") if isinstance(c.get("params"), dict) else {}
+                send_3d_command(c["action"], params)
+                self._report_viewer_status()
+                time.sleep(1.0)
         """將目前對話（含當下聲音、服務、模型、角色）寫入磁檔。"""
         if self.current_session is None or self.current_path is None:
             return
@@ -1848,15 +1902,19 @@ class VoiceChatApp:
             prompt += PERSONA_LABELS.get(self.convo_lang, "\n角色設定：") + self.persona
         return prompt
 
-    def _on_toggle_3d(self):
-        """3D 開關被使用者點擊時，背景檢查檢視器是否執行中。"""
-        if self.enable_3d_var.get():
-            threading.Thread(target=self._check_viewer_3d, daemon=True).start()
+    def _report_viewer_status(self, connected=None):
+        """更新狀態列的 3D 燈；connected 為 None 時即時探測檢視器存活狀態。"""
+        if connected is None:
+            connected = viewer_alive()
+        self._emit(
+            "viewer3d_ok" if connected else "viewer3d_ng",
+            tr("conn_ok") if connected else tr("conn_ng"),
+        )
 
-    def _check_viewer_3d(self):
-        """檢視器未連線時以系統訊息提示（不阻斷對話）。"""
-        if not viewer_alive():
-            self._emit("text", tr("msg_3d_offline"), "sys")
+    def _on_toggle_3d(self):
+        """3D 開關被使用者點擊時，背景檢查檢視器是否執行中並更新狀態燈。"""
+        if self.enable_3d_var.get():
+            threading.Thread(target=self._report_viewer_status, daemon=True).start()
 
     # ---------- 事件 ----------
 
@@ -2052,7 +2110,9 @@ class VoiceChatApp:
 
         self._emit("text", tr("msg_summarizing"), "sys")
         # 摘要輸入同樣只取對話語言視圖，日文朗讀行不送模型
-        older_view = llm_view(self.history[:-KEEP_RECENT_MESSAGES], self.convo_lang)
+        older_view = llm_view(
+            self.history[:-KEEP_RECENT_MESSAGES], self.convo_lang, include_stage=False
+        )
         transcript = "\n".join(
             f"{tr('role_user') if m.get('role') == 'user' else 'AI'}：{m.get('content', '')}"
             for m in older_view
@@ -2116,13 +2176,16 @@ class VoiceChatApp:
             self._emit("busy", False)
             return
 
-        # 3D 指令抽取（僅在開關開啟時；指令區塊不顯示、不翻譯、不入歷史）
+        # 3D 指令抽取（僅在開關開啟時；指令區塊不顯示、不翻譯）
+        # 指令同時存入 assistant 訊息的 3d 欄位，供歷史重播與模型範例使用
+        commands = []
         if self.enable_3d_var.get():
             commands, reply = split_3d(reply)
             for c in commands:
                 action = c.get("action") or "reset"
                 params = c.get("params") if isinstance(c.get("params"), dict) else {}
                 send_3d_command(action, params)
+                self._report_viewer_status()
 
         # 模型回覆只保留使用者語言；日文朗讀稿獨立存放，永不送回模型。
         conv, legacy_voice = reply_parts(reply, self.convo_lang)
@@ -2133,6 +2196,8 @@ class VoiceChatApp:
             voice = ""
             self._emit("text", f"[翻譯失敗，略過朗讀] {e}\n可按「重新翻譯」重試\n", "sys")
         assistant_message = {"role": "assistant", "content": conv}
+        if commands:
+            assistant_message["3d"] = commands
         if voice:
             assistant_message["voice"] = voice
         self.history.append(assistant_message)
@@ -2161,7 +2226,7 @@ class VoiceChatApp:
         model = self.model_name
         lang = self.convo_lang
         # 標題輸入同樣只取對話語言視圖
-        view = llm_view(session["history"], lang)
+        view = llm_view(session["history"], lang, include_stage=False)
         user_text = next(
             (m.get("content", "") for m in view if m.get("role") == "user"),
             "",
@@ -2201,6 +2266,7 @@ class VoiceChatApp:
         lipsync_3d = self.enable_3d_var.get()
         if lipsync_3d:
             send_3d_command("lipsync", {"active": True})
+            self._report_viewer_status()
         try:
             seq = 0
             for sentence in split_sentences(text):
@@ -2235,6 +2301,7 @@ class VoiceChatApp:
         finally:
             if lipsync_3d:
                 send_3d_command("lipsync", {"active": False})
+                self._report_viewer_status()
 
 
 def main():

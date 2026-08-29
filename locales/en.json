@@ -3,6 +3,7 @@
   "status_engine": "Engine: ",
   "status_ollama": "Ollama: ",
   "status_or": "OpenRouter: ",
+  "status_viewer": "3D: ",
   "checking": "Checking…",
   "key_loaded": "Key loaded",
   "key_missing": "No key (.env)",
@@ -91,6 +92,5 @@
   "msg_nothing_retry_translate": "[No reply to re-translate]\n",
   "msg_nothing_retry": "[Nothing to retry]\n",
   "msg_busy_retry": "[Wait for current reply]\n",
-  "chk_enable_3d": "Enable 3D performance",
-  "msg_3d_offline": "[3D viewer not connected: run start_viewer.bat to open the viewer (3D commands will be ignored)]\n"
+  "chk_enable_3d": "Enable 3D performance"
 }

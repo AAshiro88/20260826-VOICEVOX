@@ -15085,6 +15085,9 @@
       if (this._physics) {
         this._physics.evaluate(model, delta);
       }
+      if (this._pose) {
+        this._pose.updateParameters(model, delta);
+      }
       model.update();
       return this.effectiveScale;
     }
@@ -15138,10 +15141,9 @@
       }
       this.lipsyncTick += delta;
       const base = this.expression["ParamMouthOpenY"] || 0;
-      const waveA = 0.5 + 0.5 * Math.sin(this.lipsyncTick * 16);
-      const waveB = 0.5 + 0.5 * Math.sin(this.lipsyncTick * 37 + 1.7);
-      const amp = 0.35 + 0.6 * Math.max(waveA * 0.7, waveB * 0.5, 0.15);
-      pending["ParamMouthOpenY"] = Math.max(base, clamp(base + amp * this.lipsyncLevel, 0, 1));
+      const wave = 0.5 + 0.5 * Math.max(Math.sin(this.lipsyncTick * 9), Math.sin(this.lipsyncTick * 17 + 1.7));
+      const amp = 0.18 * this.lipsyncLevel;
+      pending["ParamMouthOpenY"] = Math.max(base, clamp(base + amp * wave, 0, 1));
     }
     _applyPending(pending) {
       for (const name of Object.keys(pending)) {
@@ -15298,6 +15300,13 @@ ${err}`);
             `/model/${encRel(dir)}${encFile(physicsFile)}`
           );
           userModel.loadPhysics(physBuffer, physBuffer.byteLength);
+        }
+        const poseFile = setting.getPoseFileName();
+        if (poseFile) {
+          const poseBuffer = await this._fetchArrayBuffer(
+            `/model/${encRel(dir)}${encFile(poseFile)}`
+          );
+          userModel.loadPose(poseBuffer, poseBuffer.byteLength);
         }
         const breath = CubismBreath.create();
         const pi = pid;

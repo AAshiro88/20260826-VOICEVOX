@@ -3,6 +3,7 @@
   "status_engine": "エンジン状態：",
   "status_ollama": "Ollama：",
   "status_or": "OpenRouter：",
+  "status_viewer": "3D：",
   "checking": "確認中…",
   "key_loaded": "キー読み込み済み",
   "key_missing": "キー未設定（.env）",
@@ -91,6 +92,5 @@
   "msg_nothing_retry_translate": "[再翻訳する返信がありません]\n",
   "msg_nothing_retry": "[再生成する訊息がありません]\n",
   "msg_busy_retry": "[只今処理中の返信をお待ちください]\n",
-  "chk_enable_3d": "3D 演出を有効化",
-  "msg_3d_offline": "[3D ビューアーに接続できません：start_viewer.bat で起動してください（3D 演出は表示されません）]\n"
+  "chk_enable_3d": "3D 演出を有効化"
 }
