@@ -55,6 +55,60 @@ ENGINE_URL = "http://127.0.0.1:50021"
 OLLAMA_URL = "http://127.0.0.1:11434"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
+# 3D 檢視器（Live2D）整合：本機伺服器位址與短逾時，避免影響對話流程
+VIEWER_URL = "http://127.0.0.1:8767"
+VIEWER_TIMEOUT = 3
+# 模型回覆中的 3D 指令區塊格式：[3d]{json}[/3d]
+_3D_RE = re.compile(r"\[3d\](.*?)\[/3d\]", re.IGNORECASE | re.DOTALL)
+
+
+def viewer_alive():
+    """檢查 3D 檢視器伺服器是否執行中（本機）。"""
+    try:
+        with urllib.request.urlopen(
+            VIEWER_URL + "/api/ping", timeout=VIEWER_TIMEOUT
+        ) as res:
+            return res.status == 200
+    except Exception:
+        return False
+
+
+def send_3d_command(action, params=None):
+    """把一則 3D 指令送至檢視器伺服器；回傳是否成功（失敗不丟例外）。"""
+    body = json.dumps({"action": action, "params": params or {}}).encode("utf-8")
+    req = urllib.request.Request(
+        VIEWER_URL + "/api/command",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=VIEWER_TIMEOUT) as res:
+            return res.status == 200
+    except Exception:
+        return False
+
+
+def split_3d(text):
+    """從模型回覆抽出 [3d]...[/3d] 指令區塊。
+
+    回傳 (commands, cleaned)；只有能 JSON 解析且含 action 的區塊會被保留。
+    指令區塊不顯示、不翻譯、不入歷史。
+    """
+    cleaned = _3D_RE.sub(" ", text)
+    commands = []
+    for m in _3D_RE.finditer(text):
+        raw = m.group(1).strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(data, dict) and data.get("action"):
+            commands.append(data)
+    return commands, cleaned
+
 def get_base_dir():
     """取得程式基底目錄。
 
@@ -343,6 +397,45 @@ SYSTEM_PROMPTS = {
         "You are a companion chatting with the user. Reply only in natural, spoken "
         "English. Do not use Markdown, emoji, or bullet lists. Keep replies short "
         "and conversational."
+    ),
+}
+
+# 3D 演出提示詞（對話的「啟用 3D 演出」開啟時，附加到系統提示末尾）。
+# 只要求輸出 [3d] JSON 指令區塊，正文格式規範維持不變。
+_3D_PROMPTS = {
+    "ja": (
+        "\n会話の内容に合わせて 3D キャラクターを演出できます。"
+        "演出したいときは、本文とは別に次の形式の JSON だけを出力してください（前後に説明を付けないこと）：\n"
+        "[3d]{\"action\":\"...\",\"params\":{...}}[/3d]\n"
+        "利用できる命令：\n"
+        "  expression（表情）：name は neutral / happy / angry / sad / surprised / love / cry / blush / sleep / worried / smug のいずれか\n"
+        "  motion（動作）：name は nod / shake / look_left / look_right / look_up / look_down / body_left / body_right / wave / point / shrink のいずれか\n"
+        "  parameter（パラメータ操作）：id（パラメータ名）・value（目標値）・duration（遷移時間・秒）\n"
+        "  reset（全て初期化）／ stop（動作を中止）\n"
+        "1 回の返答で複数の命令を続けて出力して構いません。本文はこれまで通り自然な日本語だけにしてください。"
+    ),
+    "zh": (
+        "\n與使用者對話時，可以依內容驅動 3D 角色演出。"
+        "想演出時，請在正文之外額外輸出以下格式的 JSON 指令（不加任何前後說明）：\n"
+        "[3d]{\"action\":\"...\",\"params\":{...}}[/3d]\n"
+        "可用指令：\n"
+        "  expression（表情）：name 為 neutral / happy / angry / sad / surprised / love / cry / blush / sleep / worried / smug\n"
+        "  motion（動作）：name 為 nod / shake / look_left / look_right / look_up / look_down / body_left / body_right / wave / point / shrink\n"
+        "  parameter（參數）：id（參數名）、value（目標值）、duration（過渡秒數）\n"
+        "  reset（全部重設）／ stop（中止動作）\n"
+        "一次回覆可連續輸出多個指令。本文維持自然口語的繁體中文即可。"
+    ),
+    "en": (
+        "\nWhen chatting, you may also drive the 3D character's performance. "
+        "To perform, output a JSON command separately from the body in this exact "
+        "format, with no words around it:\n"
+        "[3d]{\"action\":\"...\",\"params\":{...}}[/3d]\n"
+        "Available actions:\n"
+        "  expression (facial): name is one of neutral / happy / angry / sad / surprised / love / cry / blush / sleep / worried / smug\n"
+        "  motion: name is one of nod / shake / look_left / look_right / look_up / look_down / body_left / body_right / wave / point / shrink\n"
+        "  parameter: id (parameter name), value (target), duration (seconds)\n"
+        "  reset (restore everything), stop (cancel current motion)\n"
+        "You may output several commands in one reply. Keep the main body natural spoken English as usual."
     ),
 }
 
@@ -811,6 +904,13 @@ class VoiceChatApp:
             side="left", padx=(0, 4)
         )
         ttk.Button(prow, text=tr("btn_apply_persona"), command=self.apply_persona).pack(side="left")
+
+        # 3D 演出開關：開啟後模型回覆可附帶 [3d] JSON 指令驅動 3D 角色
+        self.enable_3d_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            prow, text=tr("chk_enable_3d"), variable=self.enable_3d_var,
+            command=self._on_toggle_3d,
+        ).pack(side="right", padx=8)
 
         # 對話管理列
         srow = ttk.Frame(self.root, padding=(6, 0))
@@ -1389,6 +1489,7 @@ class VoiceChatApp:
             "model": data.get("model", ""),
             "lang": data.get("lang") if data.get("lang") in CONVO_LANG_NAMES else DEFAULT_CONVO_LANG,
             "persona": data.get("persona", "") if isinstance(data.get("persona"), str) else "",
+            "enable_3d": bool(data.get("enable_3d")),
             "history": history,
         }
         self.current_session = session
@@ -1408,6 +1509,9 @@ class VoiceChatApp:
         self.persona_entry.delete(0, "end")
         if self.persona:
             self.persona_entry.insert(0, self.persona)
+
+        # 還原 3D 演出開關（設定不觸發 _on_toggle_3d 的連線檢查）
+        self.enable_3d_var.set(bool(session["enable_3d"]))
 
         # 還原服務與模型
         self.provider = provider
@@ -1495,6 +1599,7 @@ class VoiceChatApp:
         self.current_session["model"] = self.model_name
         self.current_session["lang"] = self.convo_lang
         self.current_session["persona"] = self.persona
+        self.current_session["enable_3d"] = bool(self.enable_3d_var.get())
         payload = json.dumps(self.current_session, ensure_ascii=False, indent=2)
         try:
             with self.file_lock:
@@ -1544,6 +1649,7 @@ class VoiceChatApp:
             "model": self.model_name,
             "lang": self.convo_lang,
             "persona": "",
+            "enable_3d": bool(self.enable_3d_var.get()),
             "history": [],
         }
         self.history = self.current_session["history"]
@@ -1734,11 +1840,23 @@ class VoiceChatApp:
             self._append(tr("msg_persona_cleared").format(name), "sys")
 
     def build_system_prompt(self):
-        """組出系統提示：格式規範在前，角色設定在後（避免破壞輸出格式）。"""
+        """組出系統提示：格式規範在前，3D／角色設定在後（避免破壞輸出格式）。"""
         prompt = SYSTEM_PROMPTS.get(self.convo_lang, SYSTEM_PROMPTS["zh"])
+        if self.enable_3d_var.get():
+            prompt += _3D_PROMPTS.get(self.convo_lang, _3D_PROMPTS["zh"])
         if self.persona:
             prompt += PERSONA_LABELS.get(self.convo_lang, "\n角色設定：") + self.persona
         return prompt
+
+    def _on_toggle_3d(self):
+        """3D 開關被使用者點擊時，背景檢查檢視器是否執行中。"""
+        if self.enable_3d_var.get():
+            threading.Thread(target=self._check_viewer_3d, daemon=True).start()
+
+    def _check_viewer_3d(self):
+        """檢視器未連線時以系統訊息提示（不阻斷對話）。"""
+        if not viewer_alive():
+            self._emit("text", tr("msg_3d_offline"), "sys")
 
     # ---------- 事件 ----------
 
@@ -1998,6 +2116,14 @@ class VoiceChatApp:
             self._emit("busy", False)
             return
 
+        # 3D 指令抽取（僅在開關開啟時；指令區塊不顯示、不翻譯、不入歷史）
+        if self.enable_3d_var.get():
+            commands, reply = split_3d(reply)
+            for c in commands:
+                action = c.get("action") or "reset"
+                params = c.get("params") if isinstance(c.get("params"), dict) else {}
+                send_3d_command(action, params)
+
         # 模型回覆只保留使用者語言；日文朗讀稿獨立存放，永不送回模型。
         conv, legacy_voice = reply_parts(reply, self.convo_lang)
         try:
@@ -2067,37 +2193,48 @@ class VoiceChatApp:
         self.root.after(0, lambda: self._rename_active_to(title, announce=True))
 
     def speak(self, text):
-        """逐句合成並同步播放；可由停止按鈕中斷。傳入文字為朗讀用日文。"""
-        seq = 0
-        for sentence in split_sentences(text):
-            if self.stop_requested:
-                return
-            try:
-                # /audio_query 為 POST，參數在網址、內容為空
-                query = json.loads(
-                    post_json(
-                        "/audio_query",
+        """逐句合成並同步播放；可由停止按鈕中斷。傳入文字為朗讀用日文。
+
+        3D 演出開啟時，同步送出口型指令（speak 開始／結束），
+        中途停止也會在 finally 中送出結束指令。
+        """
+        lipsync_3d = self.enable_3d_var.get()
+        if lipsync_3d:
+            send_3d_command("lipsync", {"active": True})
+        try:
+            seq = 0
+            for sentence in split_sentences(text):
+                if self.stop_requested:
+                    return
+                try:
+                    # /audio_query 為 POST，參數在網址、內容為空
+                    query = json.loads(
+                        post_json(
+                            "/audio_query",
+                            ENGINE_URL,
+                            {"text": sentence, "speaker": self.speaker_id},
+                        ).decode("utf-8")
+                    )
+                    wav_data = post_json(
+                        "/synthesis",
                         ENGINE_URL,
-                        {"text": sentence, "speaker": self.speaker_id},
-                    ).decode("utf-8")
-                )
-                wav_data = post_json(
-                    "/synthesis",
-                    ENGINE_URL,
-                    {"speaker": self.speaker_id},
-                    query,
-                    timeout=120,
-                )
-            except Exception as e:
-                self._emit("text", tr("msg_tts_failed").format(e), "sys")
-                return
-            seq += 1
-            wav_path = str(TMP_DIR / f"reply_{threading.get_ident()}_{seq}.wav")
-            with open(wav_path, "wb") as f:
-                f.write(wav_data)
-            if self.stop_requested:
-                return
-            winsound.PlaySound(wav_path, winsound.SND_FILENAME)
+                        {"speaker": self.speaker_id},
+                        query,
+                        timeout=120,
+                    )
+                except Exception as e:
+                    self._emit("text", tr("msg_tts_failed").format(e), "sys")
+                    return
+                seq += 1
+                wav_path = str(TMP_DIR / f"reply_{threading.get_ident()}_{seq}.wav")
+                with open(wav_path, "wb") as f:
+                    f.write(wav_data)
+                if self.stop_requested:
+                    return
+                winsound.PlaySound(wav_path, winsound.SND_FILENAME)
+        finally:
+            if lipsync_3d:
+                send_3d_command("lipsync", {"active": False})
 
 
 def main():

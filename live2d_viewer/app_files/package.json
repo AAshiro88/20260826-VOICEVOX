@@ -1,0 +1,12 @@
+{
+  "name": "live2d-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Live2D 檢視器前端建置（esbuild）",
+  "scripts": {
+    "build": "esbuild ../web/viewer_main.js --bundle --outfile=../web/viewer.bundle.js --sourcemap --format=iife --log-level=warning"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

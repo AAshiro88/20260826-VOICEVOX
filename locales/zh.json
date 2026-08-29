@@ -90,5 +90,7 @@
   "msg_retry_translate_fail": "[重新翻譯失敗：{}]\n",
   "msg_nothing_retry_translate": "[沒有需要重新翻譯的回覆]\n",
   "msg_nothing_retry": "[沒有可重新生成的回覆]\n",
-  "msg_busy_retry": "[請先等待目前回覆完成]\n"
+  "msg_busy_retry": "[請先等待目前回覆完成]\n",
+  "chk_enable_3d": "啟用 3D 演出",
+  "msg_3d_offline": "[3D 檢視器尚未連線：請先執行 start_viewer.bat 開啟檢視器視窗，3D 指令將不會顯示]\n"
 }

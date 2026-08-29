@@ -1,6 +1,6 @@
 # VOICEVOX × Ollama／OpenRouter 語音對話工具
 
-以本地語音合成（VOICEVOX）搭配大型語言模型（本機 Ollama 或 OpenRouter 雲端 API）的圖形介面對話程式。AI 回覆會自動朗讀，支援多重對話管理、角色設定，對話語言可選日本語／中文／English，介面文字亦提供三語切換。
+以本地語音合成（VOICEVOX）搭配大型語言模型（本機 Ollama 或 OpenRouter 雲端 API）的圖形介面對話程式。AI 回覆會自動朗讀，支援多重對話管理、角色設定，對話語言可選日本語／中文／English，介面文字亦提供三語切換。已內建 **Live2D 3D 演出**：開啟「啟用 3D 演出」後，AI 會在回覆時輸出 `[3d]` 指令，驅動另一視窗中的 3D 角色做表情、動作與口型同步。
 
 主程式使用 Python 標準庫，另使用 **deep-translator** 將非日文回覆翻成日文朗讀；相依套件列於 `requirements.txt`。
 
@@ -18,6 +18,7 @@
 - **歷史自動摘要**：對話過長時自動呼叫目前模型整理成重點摘要＋保留最近數則原文（摘要輸入同樣只取對話語言）；整理中暫停接受新訊息
 - **雙語顯示**：中文／English 模式下，AI 以「對話語言（主要行）＋日文朗讀行（灰色底線）」顯示，看得到也聽得到
 - **重新生成**：AI 回覆不滿意或格式壞掉時，按「重新生成」按鈕移除最後一則回覆並重新呼叫模型生成
+- **3D 角色演出（Live2D）**：勾選「啟用 3D 演出」後，系統提示會注入 3D 指令格式說明，模型可依對話內容輸出 `[3d]{json}[/3d]` 指令，驅動 `start_viewer.bat` 開啟的 3D 檢視器（表情／動作／參數控制／口型同步）；指令不會顯示在對話、不會翻譯、也不會存入歷史
 - **介面文字外部化**：`locales/{zh,ja,en}.json` 維護三語介面字串，方便增刪與在地化
 
 ## 檔案結構
@@ -28,11 +29,18 @@
 ├─ ollama_voice_chat.py     舊版純命令列介面（僅支援 Ollama，保留備用）
 ├─ voicevox_api_test.py     VOICEVOX 引擎 API 連通測試腳本
 ├─ locales/                 介面多國語系
-│  ├─ zh.json               繁體中文（86 鍵）
-│  ├─ ja.json               日本語（86 鍵）
-│  └─ en.json               English（86 鍵）
+│  ├─ zh.json               繁體中文（88 鍵）
+│  ├─ ja.json               日本語（88 鍵）
+│  └─ en.json               English（88 鍵）
+├─ live2d_viewer/           3D 檢視器（Live2D Web）
+│  ├─ server.py             本機伺服器（Python 標準庫，127.0.0.1:8767）
+│  ├─ web/                  前端（index.html / style.css / viewer_main.js，經 esbuild 打包成 viewer.bundle.js）
+│  └─ app_files/            esbuild 建置（package.json / build.bat）
+├─ start_viewer.bat         雙擊啟動 3D 檢視器伺服器（自動開瀏覽器）
+├─ 3D/                      Live2D 模型資料夾（掃描 *.model3.json；不入版控，clone 後自行放入）
+├─ CubismSdkForWeb-5-r.5/   Live2D Cubism Web SDK r.5（版控僅收 Framework/ 與 Core/，官方 Samples/ 不納入）
 ├─ .env                     OPENROUTER_API_KEY（金鑰，不上 GIT）
-└─ chats/                   對話紀錄（chat_日期_時間_毫秒.json，含角色設定）
+└─ chats/                   對話紀錄（chat_日期_時間_毫秒.json，含角色設定；屬個人隱私，不入版控）
 ```
 
 ## 環境需求
@@ -43,6 +51,7 @@
 | Python | 3.8 以上（開發環境為 Anaconda） |
 | VOICEVOX | [產品版 0.25.2](https://voicevox.hiroshiba.jp/)（`voicevox-windows-directml-0.25.2.zip`），啟動後引擎自動監聽 `127.0.0.1:50021` |
 | 對話來源 | Ollama（本機）或 OpenRouter API 金鑰（擇一即可） |
+| 3D 演出（選用） | Live2D 模型放 `3D/`（資料夾未入版控）；建置前端需 Node.js；通常使用 Chrome／Edge／Firefox 開啟檢視器 |
 
 ## 安裝
 
@@ -97,7 +106,7 @@ C:\ProgramData\Anaconda3\python.exe AI_voice_chat_ui.py
 | 狀態列 | 即時顯示引擎／Ollama／OpenRouter 連線狀態（綠＝正常、紅＝未連線） |
 | 聲音列 | Provider 切換 → 角色 Combobox（偏好 3 個角色優先顯示，取消勾選「偏好」展開全部）→ 風格 Combobox（對應角色的朗讀風格）→ 偏好篩選 checkbox |
 | 模型列 | 模型 Combobox（可編輯+即時篩選，右側有文字輸入框可過濾關鍵字）→ 介面語言切換（保留目前 chat 的語言）→ 停止朗讀 |
-| 角色列 | 單行摘要 Entry（width=18）→「編輯」按鈕開啟多行對話框 →「套用」按鈕或 Enter 套用角色 |
+| 角色列 | 單行摘要 Entry（width=18）→「編輯」按鈕開啟多行對話框 →「套用」按鈕或 Enter 套用角色；右側為「啟用 3D 演出」開關 |
 | 對話列 | 開新對話（綁定目前語言）／載入／改名／刪除；**清單只顯示目前語言的對話** |
 | 輸入區 | Enter 送出、Shift+Enter 換行 |
 
@@ -111,11 +120,25 @@ python voicevox_api_test.py
 python ollama_voice_chat.py
 ```
 
+### 3D 角色演出（Live2D）
+
+3D 是「獨立視窗」模式，與主程式分開啟動：
+
+1. **建置前端（僅首次／改過 `viewer_main.js` 後）**：需要 Node.js，執行 `live2d_viewer\app_files\build.bat` 產生 `viewer.bundle.js`
+2. **安裝模型**：`3D/` 未入版控，clone 後請先把想用的 Live2D 模型資料夾放進去（每個模型至少需 `*.model3.json` 與 `.moc3`、紋理）
+3. **啟動檢視器**：雙擊 `start_viewer.bat`，會開啟本機伺服器並自動在瀏覽器打開檢視器視窗（網址 `http://127.0.0.1:8767/`），用頂部下拉切換模型
+4. **主程式**：照常啟動 `start_ai_voice_chat.bat`，勾選「啟用 3D 演出」後開始對話
+
+勾選後 AI 可依對話內容輸出 `[3d]` JSON 指令，支援：`expression`（11 種表情）、`motion`（11 種動作）、`parameter`（指定參數過渡）、`stop`、`reset`；朗讀期間角色嘴型會跟著說話起伏（`speak` 開始／結束自動送 `lipsync` 事件）。關閉開關即恢復原本純文字行為，指令也會被忽略。若檢視器未執行，勾選時會在對話區提示一次，對話流程不受影響。
+
+檢視器網頁右下角有「動作測試」面板：所有表情、動作、口型開關與參數測試都可直接點按（指令走與 AI 相同的 `/api/command` 鏈路）；另有「呼吸晃動」「自動眨眼」開關可關閉角色的自動演出。
+
 ### 懶人啟動與打包成 exe
 
 | 檔案 | 用途 |
 |------|------|
 | `start_ai_voice_chat.bat` | 雙擊直接啟動主程式（自動找 Anaconda Python） |
+| `start_viewer.bat` | 雙擊啟動 3D 檢視器伺服器（自動找 Anaconda Python，自動開瀏覽器） |
 | `build_exe.bat` | 以 PyInstaller 打包成單一執行檔 `dist\AI_VoiceChat_UI.exe` |
 
 打包注意：**`.env`、`chats/`、`locales/` 不會被封裝進 exe**。程式在打包模式（frozen）下會改以 exe 所在資料夾作為基底目錄，因此使用 exe 前請手動把 `.env` 與 `locales/` 複製到 `dist\` 旁；`chats\` 會在首次存檔時自動建立在 exe 旁。
@@ -134,6 +157,7 @@ python ollama_voice_chat.py
   "model": "stealth/ox-alpha",
   "lang": "zh",
   "persona": "傲嬌的妹妹",
+  "enable_3d": false,
   "history": [
     { "role": "user", "content": "你好" },
     { "role": "assistant", "content": "你好呀！", "voice": "やあ！" },
@@ -142,7 +166,7 @@ python ollama_voice_chat.py
 }
 ```
 
-`history` 中 role 為 system 的項目是自動摘要產物，載入重播時不顯示。assistant 的 `content` 永遠是模型以使用者語言回答的單語文字；非日語對話的 `voice` 則是 `deep-translator` 產生的日文朗讀稿，**不會送回 LLM**。`persona` 是該對話專屬的角色設定，載入時自動還原到介面輸入框。`lang` 是該對話綁定的語言（`ja`／`zh`／`en`），同時決定它在對話清單中的歸屬——**清單只顯示目前語言的對話**；舊檔案沒有此欄位時視為 `zh`，不需遷移。
+`history` 中 role 為 system 的項目是自動摘要產物，載入重播時不顯示。assistant 的 `content` 永遠是模型以使用者語言回答的單語文字；非日語對話的 `voice` 則是 `deep-translator` 產生的日文朗讀稿，**不會送回 LLM**。`persona` 是該對話專屬的角色設定，載入時自動還原到介面輸入框。`enable_3d` 是該對話的 3D 演出開關（`true`／`false`，舊檔案沒有此欄位時視為關閉）。`lang` 是該對話綁定的語言（`ja`／`zh`／`en`），同時決定它在對話清單中的歸屬——**清單只顯示目前語言的對話**；舊檔案沒有此欄位時視為 `zh`，不需遷移。
 
 > 舊版 assistant JSON（含 `zh`／`en`／`jp` 欄位）仍可正常載入、顯示與重播；新回覆會在下次存檔時使用單語 `content` 與獨立 `voice` 欄位。更早的 `日:`／`中:`／`英:` 前綴格式則視為一般文字，建議重新生成以取得正確朗讀稿。
 
@@ -166,8 +190,9 @@ AI_voice_chat_ui.py
 ├─ .env 載入         load_env() → OPENROUTER_API_KEY（金鑰存於記憶體，不寫入輸出）
 ├─ 介面文字載入      load_locale() / get_locale_dict() / set_ui_lang() / tr()
 │                    （自 locales/{zh,ja,en}.json 動態載入，缺漏退回繁體中文）
-├─ 語言與提示詞      CONVO_LANGS / SYSTEM_PROMPTS / SUMMARY_ASKS / SUMMARY_HEADERS / TITLE_ASKS
+├─ 語言與提示詞      CONVO_LANGS / SYSTEM_PROMPTS / _3D_PROMPTS / SUMMARY_ASKS / SUMMARY_HEADERS / TITLE_ASKS
 ├─ HTTP 輔助         http_json() / post_json()（urllib 標準庫）
+├─ 3D 檢視器整合     viewer_alive() / send_3d_command() / split_3d()（[3d] JSON 指令抽取與發送）
 ├─ 回覆與翻譯        reply_parts() / assistant_conv_text() / llm_view()
 │                    translate_to_japanese()（deep-translator）
 ├─ 其他純函式        split_sentences() / sanitize_filename() / clean_title()
@@ -184,6 +209,7 @@ AI_voice_chat_ui.py
 │   ├─ 對話管理       new_session() / load_selected_session() / rename / delete
 │   │                 handle_restore() / write_session_file() / refresh_session_list()
 │   ├─ 角色設定       apply_persona() / build_system_prompt() / open_persona_editor()
+│   │                 / _on_toggle_3d() / _check_viewer_3d()
 │   ├─ 訊息流程       send_message() / _on_return() / retry_last() / chat_worker()
 │   ├─ 後台工作       call_llm() / maybe_summarize() / auto_title_worker() / speak()
 │   └─ 停止與重播     stop_speaking() / replay_message()
@@ -215,11 +241,14 @@ AI_voice_chat_ui.py
   → 背景執行緒 chat_worker()
       → 歷史過長先 maybe_summarize()（壓縮舊訊息）
       → call_llm() 呼叫 Ollama 或 OpenRouter
+      → （3D 開啟時）split_3d() 抽取 [3d] 指令 → send_3d_command() 送往檢視器，
+         指令區塊從正文移除（不顯示、不翻譯、不入歷史）
       → 回覆以使用者語言存入 history
       → 中文／English 經 deep-translator 轉為日文 voice（日本語則直接使用原文）
       → write_session_file() 存檔
       → _emit("ai_msg", conv, voice) 更新畫面
       → speak(voice) 逐句送往 VOICEVOX 合成並播放
+          （3D 開啟：speak 開始／結束自動送 lipsync 口型事件，中途停止也收尾）
 ```
 
 ### 語言與回覆格式
@@ -254,15 +283,22 @@ AI_voice_chat_ui.py
 | 介面翻譯缺漏 | `locales/{zh,ja,en}.json` 找不到對應鍵時，介面會退回繁體中文，若仍無則顯示原 key；可自行編輯 JSON 補上 |
 | 模型清單太多找不到 | 在模型列右側的篩選輸入框打關鍵字即可即時過濾；Ollama 與 OpenRouter 皆適用 |
 | 角色設定太長沒地方寫 | 按「編輯」按鈕開啟多行對話框，可輸入完整角色描述（含範本），確定後自動更新摘要 |
+| 勾選 3D 後提示「檢視器尚未連線」 | 先執行 `start_viewer.bat` 開啟檢視器再對話；若已開啟仍提示，確認瀏覽器頁面停在 `127.0.0.1:8767` 且伺服器輸出沒有啟動失敗 |
+| 3D 視窗開了但角色沒動作 | 確認已勾選「啟用 3D 演出」；模型回覆若沒有 `[3d]` 區塊可能是模型能力或回覆太短，可換較強模型再試；角色沒有該表情參數時自然不會動 |
+| `viewer.bundle.js` 不存在 | 尚未建置前端，先執行 `live2d_viewer\app_files\build.bat`（需 Node.js）；`start_viewer.bat` 啟動時也會提醒 |
 
 摘要門檻與保留則數可在 `AI_voice_chat_ui.py` 頂部的 `HISTORY_CHAR_LIMIT`、`KEEP_RECENT_MESSAGES` 調整。
 
 ## GIT 注意事項
 
-`.gitignore` 已排除：
+`.gitignore` 已排除（不進入版本控制）：
 
 - `.env`——含 API 金鑰，**絕對不要提交或分享**
-- `VOICEVOX/`、`voicevox_engine-master/`、各壓縮檔——龐大的二進位資產
-- `__pycache__/`
+- `VOICEVOX/`、`voicevox_engine-master/`、各壓縮檔——龐大的二進位資產（`VOICEVOX/` 為語音引擎執行檔資料夾）
+- `3D/`——模型資產過大且含第三方版權模型（Felis、Gothic、March 7th 等）；clone 後請自行放入要用的 Live2D 模型
+- `chats/`——對話紀錄含人設與逐字稿，屬個人隱私
+- `CubismSdkForWeb-5-r.5/Samples/`——官方 Demo 範例，檢視器不需要
+- `CubismSdkForWeb-5-r.5.zip`、`live2d_viewer/app_files/node_modules/`、`live2d_viewer/web/viewer.bundle.js.map`——壓縮檔、npm 依賴與建置 sourcemap
+- `__pycache__/`、`*.pyc`
 
-`chats/`、`locales/` 屬一般資料，預設會納入版本控制；若對話內容涉及隱私，請自行將 `chats/` 加入 `.gitignore`。
+Live2D Cubism SDK for Web **r.5** 只收錄檢視器執行所需的部分：`Framework/`（TS 原始碼與 shader）與 `Core/`（`live2dcubismcore.min.js`），約 1.4 MB。官方完整 SDK（含 Samples，約 25 MB）需自行至官方下載頁 https://www.live2d.com/sdk/download/web/ 取得；更新 SDK 時更換 `CubismSdkForWeb-5-r.5/` 內容後重建前端（`build.bat`）即可。

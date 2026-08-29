@@ -11,3 +11,17 @@ voicevox-windows-directml-0.25.2.zip
 build/
 dist/
 *.spec
+
+# 大型模型資產（含第三方版權模型）與 SDK 壓縮檔
+3D/
+CubismSdkForWeb-5-r.5.zip
+
+# SDK 不需要的官方 Demo 範例（只進 Framework/ Core/ 與授權文件）
+CubismSdkForWeb-5-r.5/Samples/
+
+# 對話紀錄（個人隱私）
+chats/
+
+# npm 依賴與建置產物
+live2d_viewer/app_files/node_modules/
+live2d_viewer/web/viewer.bundle.js.map
