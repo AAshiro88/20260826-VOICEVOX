@@ -15716,6 +15716,12 @@ ${err || "\u672A\u77E5\u932F\u8AA4"}
   var canvas = document.getElementById("canvas");
   CubismFramework.startUp();
   CubismFramework.initialize();
+  var BUILD_TAG = "build-20260829-1125";
+  var verEl = document.getElementById("bundle-ver");
+  if (verEl) {
+    verEl.textContent = BUILD_TAG;
+    verEl.title = "\u5DF2\u8F09\u5165\u7248\u865F\uFF1A" + BUILD_TAG;
+  }
   var app = new ViewerApp(canvas);
   app._resize();
   initTestPanel(app);

@@ -1131,6 +1131,14 @@ const canvas = document.getElementById('canvas');
 CubismFramework.startUp();
 CubismFramework.initialize();
 
+// bundle 版本標記：重新整理後若看不到此版號，代表頁面仍在使用舊版 JavaScript
+const BUILD_TAG = 'build-20260829-1125';
+const verEl = document.getElementById('bundle-ver');
+if (verEl) {
+  verEl.textContent = BUILD_TAG;
+  verEl.title = '已載入版號：' + BUILD_TAG;
+}
+
 const app = new ViewerApp(canvas);
 app._resize();
 initTestPanel(app);
