@@ -197,3 +197,54 @@ html, body {
 .tp-btns input[type="number"] {
   width: 76px;
 }
+
+/* 可收合群組：點標題列切換展開／收合 */
+.tp-collapse .tp-title {
+  cursor: pointer;
+  user-select: none;
+}
+.tp-collapse .tp-title::after {
+  content: ' ▶';
+  font-size: 9px;
+}
+.tp-collapse .tp-title:hover {
+  opacity: 0.9;
+}
+.tp-btns.hidden {
+  display: none;
+}
+
+/* 微調滑桿列：label＋range 撐滿＋數值顯示 */
+.tp-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.tp-slider-label {
+  font-size: 11px;
+  color: #b8bcc8;
+  white-space: nowrap;
+  min-width: 52px;
+}
+.tp-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  height: 16px;
+  accent-color: #b7791f;
+}
+.tp-slider-val {
+  font-size: 11px;
+  color: #e8e8f0;
+  white-space: nowrap;
+  min-width: 38px;
+  text-align: right;
+}
+
+/* 群組內的說明文字（如互動限制） */
+.tp-note {
+  font-size: 11px;
+  color: #8a8f9c;
+  margin: 2px 0 4px;
+  line-height: 1.4;
+}

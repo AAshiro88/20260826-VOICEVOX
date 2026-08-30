@@ -13,7 +13,6 @@ import { CubismModelSettingJson } from '../../CubismSdkForWeb-5-r.5/Framework/sr
 import { CubismUserModel } from '../../CubismSdkForWeb-5-r.5/Framework/src/model/cubismusermodel.ts';
 import { CubismMatrix44 } from '../../CubismSdkForWeb-5-r.5/Framework/src/math/cubismmatrix44.ts';
 import { CubismEyeBlink } from '../../CubismSdkForWeb-5-r.5/Framework/src/effect/cubismeyeblink.ts';
-import { CubismBreath, BreathParameterData } from '../../CubismSdkForWeb-5-r.5/Framework/src/effect/cubismbreath.ts';
 import { CubismLook, LookParameterData } from '../../CubismSdkForWeb-5-r.5/Framework/src/effect/cubismlook.ts';
 
 const P = CubismDefaultParameterId;
@@ -332,6 +331,18 @@ function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+// 點擊位置（邏輯座標 -1..1，上為負）→ 部位動作；'chestTouch' 表示觸發臨時表情
+function tapZone(dx, dy) {
+  if (Math.abs(dx) >= 0.3) {
+    // 左右臂區：右側偏上為揮手，其餘左／右傾
+    return dx >= 0.3 ? (dy < -0.1 ? 'wave' : 'body_right') : 'body_left';
+  }
+  if (dy < -0.3) return 'nod';         // 頭部／臉
+  if (dy < -0.05) return 'chestTouch'; // 胸部（害羞表情）
+  if (dy < 0.55) return 'point';       // 腰部
+  return 'shake';                      // 下緣／腿部
+}
+
 function easeOut(t) {
   return 1 - (1 - t) * (1 - t);
 }
@@ -365,6 +376,9 @@ class ViewerModel extends CubismUserModel {
   constructor() {
     super();
     this.look = null;
+    this.lookFollow = true; // 視線跟隨游標開關（由 ViewerApp 於切換模型時沿用）
+    this.tempExpr = null;   // 臨時表情（點擊胸部害羞）：{seq,dur,t,keys}，時間到自動還原
+    this.tempExprSeq = 0;   // 臨時表情序號（再次觸發即重置計時）
     this.setting = null;
     this.layerOrder = null; // 使用中的模型切換時重新計算
 
@@ -393,6 +407,15 @@ class ViewerModel extends CubismUserModel {
     this.lipsyncActive = false;
     this.lipsyncLevel = 0;
     this.lipsyncTick = 0;
+
+    // 自然搖擺：低幅、長週期、似隨機的站姿微晃（與呼吸獨立）
+    this.idleSwayOn = true;
+    this.idleSwayAmp = 1;
+    this._swayT = 0;
+    // 呼吸：累積時間與依照滑桿的幅度／頻率倍率
+    this._breathT = 0;
+    this._breathAmp = 1;
+    this._breathFreq = 1;
 
     // 基礎效果開關（預設開啟；關閉後角色不會自動扭動／眨眼）
     this.autoBreath = true;
@@ -453,6 +476,23 @@ class ViewerModel extends CubismUserModel {
         this.setParam(key, FACIAL_RESET[key]);
       }
     }
+  }
+
+  /* 點擊胸部：觸發短暫害羞表情，時間到自動還原（不碰既有表情層） */
+  triggerChestBlush(durSec = 1.2) {
+    this.tempExprSeq += 1;
+    const keys = Object.assign({}, EXPRESSIONS.blush || {});
+    // 快照觸發前實際存在的參數值，結束時還原；不存在於此模型的參數不寫入也不還原
+    const snap = {};
+    if (this._model) {
+      for (const name of Object.keys(keys)) {
+        const idx = this._model.getParameterIndex(pid(name));
+        if (idx >= 0) {
+          snap[name] = this._model.getParameterValueByIndex(idx);
+        }
+      }
+    }
+    this.tempExpr = { seq: this.tempExprSeq, dur: durSec, t: 0, keys, snap };
   }
 
   applyMotionCmd(params) {
@@ -534,10 +574,14 @@ class ViewerModel extends CubismUserModel {
     this.lipsyncActive = false;
   }
 
-  /* 每幀更新（在 model.loadParameters() 之後呼叫） */
+  /* 每幀更新（先還原為載入時的初始參數，再做效果疊加，避免值漂移） */
   updateFrame(delta, time) {
     const model = this._model;
     if (!model) return;
+
+    // 將參數還原為載入時的初值，作為本幀基準；
+    // 未還原時效果的疊加會累積到前一幀的值上，導致參數往範圍邊界漂移、畫面大幅跳變。
+    model.loadParameters();
 
     // 動作結束後自動還原中性表情：延後到幀開頭執行，
     // 避免同幀 foldExpression 已用舊表情建好 pending 並在最後覆蓋還原值。
@@ -552,10 +596,16 @@ class ViewerModel extends CubismUserModel {
     if (this._eyeBlink && this.autoBlink) {
       this._eyeBlink.updateParameters(model, delta);
     }
-    if (this._breath && this.autoBreath) {
-      this._breath.updateParameters(model, delta);
+    if (this._breathAmp != null && this.autoBreath) {
+      this._updateBreath(delta);
     }
-    if (this.look && this._dragManager) {
+    // 自然搖擺：與呼吸／眨眼獨立，可個別開啟或調整幅度
+    if (this.idleSwayOn) {
+      this._updateIdleSway(delta);
+    }
+    if (this.look && this._dragManager && this.lookFollow) {
+      // 視線跟隨：每幀推進視線逼近游標目標（缺這步視線會永遠停在 0）
+      this._dragManager.update(delta);
       this.look.updateParameters(model, this._dragManager.getX(), this._dragManager.getY());
     }
 
@@ -565,6 +615,22 @@ class ViewerModel extends CubismUserModel {
     this.foldHeld(pending, delta);
     this.foldMotion(pending, delta);
     this.foldLipsync(pending, delta);
+    // 臨時表情（點擊胸部害羞）：疊在最上層，時間到還原觸發前的參數值
+    if (this.tempExpr) {
+      this.tempExpr.t += delta;
+      if (this.tempExpr.t >= this.tempExpr.dur || this.tempExpr.seq !== this.tempExprSeq) {
+        if (this.tempExpr.snap) {
+          for (const name of Object.keys(this.tempExpr.snap)) {
+            this.setParam(name, this.tempExpr.snap[name]);
+          }
+        }
+        this.tempExpr = null;
+      } else {
+        for (const name of Object.keys(this.tempExpr.keys)) {
+          pending[name] = this.tempExpr.keys[name];
+        }
+      }
+    }
 
     // 先交給物理演算，再用指令層覆蓋，確保表情／動作／口型不被物理還原
     if (this._physics) {
@@ -678,6 +744,60 @@ class ViewerModel extends CubismUserModel {
     }
   }
 
+  /* 以 clamp 方式將增量疊加到參數：目標值先限制在參數範圍內，
+   避免 repeat 參數跳出範圍而被 SDK wrap 到對向極限 */
+  _clampedAdd(id, value) {
+    const model = this._model;
+    const index = model.getParameterIndex(pid(id));
+    if (index < 0) return;
+    const min = model.getParameterMinimumValue(index);
+    const max = model.getParameterMaximumValue(index);
+    const cur = model.getParameterValueByIndex(index);
+    model.setParameterValueByIndex(index, clamp(cur + value, min, max));
+  }
+
+  /* 呼吸：極微幅、長週期的多軸正弦，對 ParamBreath 做正常起伏 */
+  _updateBreath(delta) {
+    this._breathT += delta;
+    const t = this._breathT;
+    const twoPi = 2 * Math.PI;
+    const amp = this._breathAmp;
+    const freq = this._breathFreq;
+    const breath = [
+      { id: P.ParamAngleX, peak: 0.5, cycle: 8.0, phase: 0.2 },
+      { id: P.ParamAngleY, peak: 0.4, cycle: 8.5, phase: 1.1 },
+      { id: P.ParamAngleZ, peak: 0.6, cycle: 7.5, phase: 2.0 },
+      { id: P.ParamBodyAngleX, peak: 0.3, cycle: 9.0, phase: 3.4 },
+    ];
+    for (const b of breath) {
+      const v = b.peak * amp * Math.sin((twoPi * t) / (b.cycle / freq) + b.phase);
+      this._clampedAdd(b.id, v);
+    }
+    // ParamBreath：0.5 上下正常呼吸起伏
+    const mindex = this._model.getParameterIndex(pid(P.ParamBreath));
+    if (mindex >= 0) {
+      const min = this._model.getParameterMinimumValue(mindex);
+      const max = this._model.getParameterMaximumValue(mindex);
+      const v = 0.5 + 0.5 * Math.sin((twoPi * t) / 3.2345);
+      this._model.setParameterValueByIndex(mindex, clamp(v, min, max));
+    }
+  }
+
+  /* 自然搖擺：以多個不可通分低頻正弦疊合成似隨機曲線，
+     產生極微幅的站姿重心微移，幅度由 idleSwayAmp 控制 */
+  _updateIdleSway(delta) {
+    this._swayT += delta;
+    const t = this._swayT;
+    const amp = this.idleSwayAmp;
+    const twoPi = 2 * Math.PI;
+    const x = amp * (0.55 * Math.sin((twoPi * t) / 11.3 + 0.7) + 0.45 * Math.sin((twoPi * t) / 7.9 + 2.3));
+    const y = amp * 0.4 * Math.sin((twoPi * t) / 15.7 + 3.0);
+    const z = amp * (0.7 * Math.sin((twoPi * t) / 13.1 + 1.2) + 0.3 * Math.sin((twoPi * t) / 6.7 + 0.4));
+    this._clampedAdd(P.ParamAngleX, x);
+    this._clampedAdd(P.ParamAngleY, y);
+    this._clampedAdd(P.ParamAngleZ, z);
+  }
+
   foldLipsync(pending, delta) {
     if (!this.lipsyncActive) {
       this.lipsyncLevel = Math.max(0, this.lipsyncLevel - delta * 6);
@@ -720,6 +840,7 @@ class ViewerApp {
     this.dragY = 0;
     this.commandQueue = [];
     this.lastCommandAt = 0;
+    this._lastTapAt = 0;
     this.lastTime = performance.now() / 1000;
     this.modelRel = null;
     this.loadingRel = null;
@@ -729,6 +850,14 @@ class ViewerApp {
     this.tabHidden = document.hidden;
     this.autoBreath = true; // 呼吸晃動開關（切換模型時沿用）
     this.autoBlink = true;  // 自動眨眼開關
+    this.idleSway = true;   // 自然搖擺開關（切換模型時沿用）
+    this.breathAmp = 1;     // 呼吸角度幅度倍率（滑桿控制）
+    this.breathFreq = 1;    // 呼吸週期頻率倍率（>1＝變快）
+    this.swayAmp = 1;       // 自然搖擺幅度倍率
+    this.lookFollow = true; // 視線跟隨游標（切換模型時沿用）
+    this.lookFlipX = false; // 視線水平反轉（人物轉向與滑鼠相反時開啟）
+    this.lookFlipY = false; // 視線垂直反轉
+    this.tapReact = true;   // 點擊人物觸發反應（切換模型時沿用）
 
     this._initGl();
     this._bindEvents();
@@ -759,9 +888,10 @@ class ViewerApp {
   _bindEvents() {
     window.addEventListener('resize', () => this._resize());
     this.canvas.addEventListener('pointerdown', (e) => this._pointerDown(e));
-    this.canvas.addEventListener('pointermove', (e) => this._pointerMove(e));
-    this.canvas.addEventListener('pointerup', () => this._pointerUp());
-    this.canvas.addEventListener('pointercancel', () => this._pointerUp());
+    // 視線跟隨綁在 window：游標離開畫布（甚至移到 UI 上）時仍能驅動視線
+    window.addEventListener('pointermove', (e) => this._pointerMove(e));
+    window.addEventListener('pointerup', (e) => this._pointerUp(e));
+    window.addEventListener('pointercancel', (e) => this._pointerUp(e));
     this.modelSelect.addEventListener('change', () => this._onModelChange());
     document.addEventListener('visibilitychange', () => {
       this.tabHidden = document.hidden;
@@ -779,7 +909,14 @@ class ViewerApp {
   }
 
   _pointerDown(e) {
-    this.canvas.setPointerCapture(e.pointerId);
+    try {
+      this.canvas.setPointerCapture(e.pointerId);
+    } catch (err) {
+      // 合成事件或已釋放的指標可能無法捕捉，不影響座標追蹤
+    }
+    this._pressX = e.clientX;
+    this._pressY = e.clientY;
+    this._pressAt = performance.now() / 1000;
     this._updateDrag(e);
   }
 
@@ -787,17 +924,44 @@ class ViewerApp {
     this._updateDrag(e);
   }
 
-  _pointerUp() {
-    // 放開後視線緩慢回到正中
+  _pointerUp(e) {
+    const now = performance.now() / 1000;
+    if (!this._pressAt) return;
+    const dx = Math.abs(e.clientX - this._pressX);
+    const dy = Math.abs(e.clientY - this._pressY);
+    const dt = now - this._pressAt;
+    this._pressAt = 0;
+    // 快速且幾乎沒移動的點擊：依點擊部位觸發對應動作（本地防連點）
+    if (this.tapReact && this.userModel && dx <= 10 && dy <= 10 && dt <= 0.3) {
+      if (now - this._lastTapAt >= 0.6) {
+        this._lastTapAt = now;
+        const rect = this.canvas.getBoundingClientRect();
+        const lx = clamp(((e.clientX - rect.left) / rect.width) * 2 - 1, -1, 1);
+        const ly = clamp(((e.clientY - rect.top) / rect.height) * 2 - 1, -1, 1);
+        const zone = tapZone(lx, ly);
+        if (zone === 'chestTouch') {
+          this.userModel.triggerChestBlush();
+        } else if (zone) {
+          this.userModel.applyMotionCmd({ name: zone });
+        }
+      }
+    }
   }
 
   _updateDrag(e) {
     const rect = this.canvas.getBoundingClientRect();
-    // 畫面座標 → 邏輯座標（-1..1，左上為原點）
-    this.dragX = clamp(((e.clientX - rect.left) / rect.width) * 2 - 1, -1, 1);
-    this.dragY = clamp(((e.clientY - rect.top) / rect.height) * 2 - 1, -1, 1);
-    if (this.userModel) {
-      this.userModel.setDragging(this.dragX, this.dragY);
+    // 畫面座標 → 邏輯座標（-1..1，左上為原點）；游標離開畫布時依樣運算並夾到 ±1
+    const w = rect.width;
+    const h = rect.height;
+    if (w <= 0 || h <= 0) return;
+    this.dragX = clamp(((e.clientX - rect.left) / w) * 2 - 1, -1, 1);
+    this.dragY = clamp(((e.clientY - rect.top) / h) * 2 - 1, -1, 1);
+    if (this.userModel && this.lookFollow) {
+      // 水平／垂直反轉開關：改變傳入 look 的拖拽符號（不更動 look 參數本身）
+      this.userModel.setDragging(
+        this.lookFlipX ? -this.dragX : this.dragX,
+        this.lookFlipY ? -this.dragY : this.dragY
+      );
     }
   }
 
@@ -889,19 +1053,14 @@ class ViewerApp {
         userModel.loadPose(poseBuffer, poseBuffer.byteLength);
       }
 
-      // 呼吸
-      const breath = CubismBreath.create();
-      const pi = pid;
-      breath.setParameters([
-        new BreathParameterData(pi(P.ParamAngleX), 0, 15, 6.5345, 0.5),
-        new BreathParameterData(pi(P.ParamAngleY), 0, 8, 3.5345, 0.5),
-        new BreathParameterData(pi(P.ParamAngleZ), 0, 10, 5.5345, 0.5),
-        new BreathParameterData(pi(P.ParamBodyAngleX), 0, 4, 15.5345, 0.5),
-        new BreathParameterData(pi(P.ParamBreath), 0.5, 0.5, 3.2345, 1),
-      ]);
-      userModel._breath = breath;
+      // 呼吸與自然搖擺：以 clamp-add 寫入，確保參數值不跨越範圍界限，
+      // 避免 repeat 參數在貼邊值上疊加而 wrap 到對向極限（造成大幅跳變）。
+      userModel._breathAmp = this.breathAmp;
+      userModel._breathFreq = this.breathFreq;
+      userModel.idleSwayAmp = this.swayAmp;
 
       // 視線跟隨
+      const pi = pid;
       const look = CubismLook.create();
       look.setParameters([
         new LookParameterData(pi(P.ParamAngleX), 30, 0, 0),
@@ -939,6 +1098,12 @@ class ViewerApp {
 
       this.userModel = userModel;
       this.modelRel = rel;
+      // 套用目前微調參數（呼吸幅度／頻率、搖擺開關與幅度）
+      userModel.idleSwayOn = this.idleSway;
+      userModel._breathAmp = this.breathAmp;
+      userModel._breathFreq = this.breathFreq;
+      userModel.idleSwayAmp = this.swayAmp;
+      userModel.lookFollow = this.lookFollow;
       this._hideOverlay();
     } catch (err) {
       this._showOverlay(`模型載入失敗：\n${err || '未知錯誤'}\n\n請按下拉選單選擇其他模型。`);
@@ -1270,7 +1435,7 @@ function tpToggle(text, getVal, onToggle) {
   return b;
 }
 
-function tpGroup(title) {
+function tpGroup(title, collapsible) {
   const box = document.createElement('div');
   box.className = 'tp-group';
   const h = document.createElement('div');
@@ -1280,7 +1445,42 @@ function tpGroup(title) {
   btns.className = 'tp-btns';
   box.appendChild(h);
   box.appendChild(btns);
+  if (collapsible) {
+    box.classList.add('tp-collapse');
+    h.title = '按一下收合／展開';
+    h.addEventListener('click', () => btns.classList.toggle('hidden'));
+  }
   return { box, btns };
+}
+
+/* 滑桿列：label＋range＋目前數值；輸入時呼叫 apply 套用 */
+function tpSlider(label, get, set, min, max, step, fmt, apply) {
+  const row = document.createElement('div');
+  row.className = 'tp-slider';
+  const lab = document.createElement('span');
+  lab.className = 'tp-slider-label';
+  lab.textContent = label;
+  const inp = document.createElement('input');
+  inp.type = 'range';
+  inp.min = String(min);
+  inp.max = String(max);
+  inp.step = String(step);
+  inp.value = String(get());
+  const disp = document.createElement('span');
+  disp.className = 'tp-slider-val';
+  const render = () => {
+    disp.textContent = fmt ? fmt(get()) : String(get());
+  };
+  inp.addEventListener('input', () => {
+    set(Number(inp.value));
+    if (apply) apply();
+    render();
+  });
+  row.appendChild(lab);
+  row.appendChild(inp);
+  row.appendChild(disp);
+  render();
+  return row;
 }
 
 function initTestPanel(app) {
@@ -1323,6 +1523,60 @@ function initTestPanel(app) {
   ctl.btns.appendChild(tpButton('全部還原', () => sendCommand('reset')));
   body.appendChild(ctl.box);
 
+  // 互動（可收合）：滑鼠與人物互動開關
+  const inter = tpGroup('互動', true);
+  inter.btns.appendChild(
+    tpToggle('視線跟隨', () => app.lookFollow, (v) => {
+      app.lookFollow = v;
+      if (app.userModel) app.userModel.lookFollow = v;
+    })
+  );
+  inter.btns.appendChild(
+    tpToggle('點擊反應', () => app.tapReact, (v) => {
+      app.tapReact = v;
+    })
+  );
+  inter.btns.appendChild(
+    tpToggle('水平反轉', () => app.lookFlipX, (v) => {
+      app.lookFlipX = v;
+    })
+  );
+  inter.btns.appendChild(
+    tpToggle('垂直反轉', () => app.lookFlipY, (v) => {
+      app.lookFlipY = v;
+    })
+  );
+  const note = document.createElement('div');
+  note.className = 'tp-note';
+  note.textContent = '游標離開視窗後視線停在最後方向（瀏覽器限制）。';
+  inter.btns.appendChild(note);
+  body.appendChild(inter.box);
+
+  // 微調（可收合）：自然搖擺開關＋呼吸／搖擺幅度與頻率滑桿
+  const tune = tpGroup('微調（呼吸與搖擺）', true);
+  tune.btns.appendChild(
+    tpToggle('自然搖擺', () => app.idleSway, (v) => {
+      app.idleSway = v;
+      if (app.userModel) app.userModel.idleSwayOn = v;
+    })
+  );
+  const syncTune = () => {
+    if (!app.userModel) return;
+    app.userModel._breathAmp = app.breathAmp;
+    app.userModel._breathFreq = app.breathFreq;
+    app.userModel.idleSwayAmp = app.swayAmp;
+  };
+  tune.btns.appendChild(
+    tpSlider('呼吸幅度', () => app.breathAmp, (v) => { app.breathAmp = v; }, 0, 1.5, 0.05, (v) => Math.round(v * 100) + '%', syncTune)
+  );
+  tune.btns.appendChild(
+    tpSlider('呼吸頻率', () => app.breathFreq, (v) => { app.breathFreq = v; }, 0.5, 2, 0.05, (v) => v.toFixed(2) + '×', syncTune)
+  );
+  tune.btns.appendChild(
+    tpSlider('搖擺幅度', () => app.swayAmp, (v) => { app.swayAmp = v; }, 0, 1.5, 0.05, (v) => Math.round(v * 100) + '%', syncTune)
+  );
+  body.appendChild(tune.box);
+
   const pgrp = tpGroup('參數測試');
   const datalist = document.createElement('datalist');
   datalist.id = 'tp-param-suggest';
@@ -1360,7 +1614,7 @@ CubismFramework.startUp();
 CubismFramework.initialize();
 
 // bundle 版本標記：重新整理後若看不到此版號，代表頁面仍在使用舊版 JavaScript
-const BUILD_TAG = 'build-20260830-0900';
+const BUILD_TAG = 'build-20260830-1550';
 const verEl = document.getElementById('bundle-ver');
 if (verEl) {
   verEl.textContent = BUILD_TAG;

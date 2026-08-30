@@ -15037,6 +15037,15 @@
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
   }
+  function tapZone(dx, dy) {
+    if (Math.abs(dx) >= 0.3) {
+      return dx >= 0.3 ? dy < -0.1 ? "wave" : "body_right" : "body_left";
+    }
+    if (dy < -0.3) return "nod";
+    if (dy < -0.05) return "chestTouch";
+    if (dy < 0.55) return "point";
+    return "shake";
+  }
   function easeOut(t) {
     return 1 - (1 - t) * (1 - t);
   }
@@ -15065,6 +15074,9 @@
     constructor() {
       super();
       this.look = null;
+      this.lookFollow = true;
+      this.tempExpr = null;
+      this.tempExprSeq = 0;
       this.setting = null;
       this.layerOrder = null;
       this.expression = {};
@@ -15083,6 +15095,12 @@
       this.lipsyncActive = false;
       this.lipsyncLevel = 0;
       this.lipsyncTick = 0;
+      this.idleSwayOn = true;
+      this.idleSwayAmp = 1;
+      this._swayT = 0;
+      this._breathT = 0;
+      this._breathAmp = 1;
+      this._breathFreq = 1;
       this.autoBreath = true;
       this.autoBlink = true;
     }
@@ -15133,6 +15151,21 @@
           this.setParam(key, FACIAL_RESET[key]);
         }
       }
+    }
+    /* 點擊胸部：觸發短暫害羞表情，時間到自動還原（不碰既有表情層） */
+    triggerChestBlush(durSec = 1.2) {
+      this.tempExprSeq += 1;
+      const keys = Object.assign({}, EXPRESSIONS.blush || {});
+      const snap = {};
+      if (this._model) {
+        for (const name of Object.keys(keys)) {
+          const idx = this._model.getParameterIndex(pid(name));
+          if (idx >= 0) {
+            snap[name] = this._model.getParameterValueByIndex(idx);
+          }
+        }
+      }
+      this.tempExpr = { seq: this.tempExprSeq, dur: durSec, t: 0, keys, snap };
     }
     applyMotionCmd(params) {
       const name = params && params.name;
@@ -15202,10 +15235,11 @@
       this.lipsyncLevel = 0;
       this.lipsyncActive = false;
     }
-    /* 每幀更新（在 model.loadParameters() 之後呼叫） */
+    /* 每幀更新（先還原為載入時的初始參數，再做效果疊加，避免值漂移） */
     updateFrame(delta, time) {
       const model = this._model;
       if (!model) return;
+      model.loadParameters();
       if (this.autoNeutralPending) {
         this.autoNeutralPending = false;
         if (this.exprSeq === this.exprSeqAtMotion && Object.keys(this.expression).length > 0) {
@@ -15215,10 +15249,14 @@
       if (this._eyeBlink && this.autoBlink) {
         this._eyeBlink.updateParameters(model, delta);
       }
-      if (this._breath && this.autoBreath) {
-        this._breath.updateParameters(model, delta);
+      if (this._breathAmp != null && this.autoBreath) {
+        this._updateBreath(delta);
       }
-      if (this.look && this._dragManager) {
+      if (this.idleSwayOn) {
+        this._updateIdleSway(delta);
+      }
+      if (this.look && this._dragManager && this.lookFollow) {
+        this._dragManager.update(delta);
         this.look.updateParameters(model, this._dragManager.getX(), this._dragManager.getY());
       }
       const pending = {};
@@ -15226,6 +15264,21 @@
       this.foldHeld(pending, delta);
       this.foldMotion(pending, delta);
       this.foldLipsync(pending, delta);
+      if (this.tempExpr) {
+        this.tempExpr.t += delta;
+        if (this.tempExpr.t >= this.tempExpr.dur || this.tempExpr.seq !== this.tempExprSeq) {
+          if (this.tempExpr.snap) {
+            for (const name of Object.keys(this.tempExpr.snap)) {
+              this.setParam(name, this.tempExpr.snap[name]);
+            }
+          }
+          this.tempExpr = null;
+        } else {
+          for (const name of Object.keys(this.tempExpr.keys)) {
+            pending[name] = this.tempExpr.keys[name];
+          }
+        }
+      }
       if (this._physics) {
         this._physics.evaluate(model, delta);
       }
@@ -15317,6 +15370,56 @@
         this._model.setPartOpacityById(pid(name), this.partOpacity[name]);
       }
     }
+    /* 以 clamp 方式將增量疊加到參數：目標值先限制在參數範圍內，
+     避免 repeat 參數跳出範圍而被 SDK wrap 到對向極限 */
+    _clampedAdd(id, value) {
+      const model = this._model;
+      const index = model.getParameterIndex(pid(id));
+      if (index < 0) return;
+      const min = model.getParameterMinimumValue(index);
+      const max = model.getParameterMaximumValue(index);
+      const cur = model.getParameterValueByIndex(index);
+      model.setParameterValueByIndex(index, clamp(cur + value, min, max));
+    }
+    /* 呼吸：極微幅、長週期的多軸正弦，對 ParamBreath 做正常起伏 */
+    _updateBreath(delta) {
+      this._breathT += delta;
+      const t = this._breathT;
+      const twoPi = 2 * Math.PI;
+      const amp = this._breathAmp;
+      const freq = this._breathFreq;
+      const breath = [
+        { id: P.ParamAngleX, peak: 0.5, cycle: 8, phase: 0.2 },
+        { id: P.ParamAngleY, peak: 0.4, cycle: 8.5, phase: 1.1 },
+        { id: P.ParamAngleZ, peak: 0.6, cycle: 7.5, phase: 2 },
+        { id: P.ParamBodyAngleX, peak: 0.3, cycle: 9, phase: 3.4 }
+      ];
+      for (const b of breath) {
+        const v = b.peak * amp * Math.sin(twoPi * t / (b.cycle / freq) + b.phase);
+        this._clampedAdd(b.id, v);
+      }
+      const mindex = this._model.getParameterIndex(pid(P.ParamBreath));
+      if (mindex >= 0) {
+        const min = this._model.getParameterMinimumValue(mindex);
+        const max = this._model.getParameterMaximumValue(mindex);
+        const v = 0.5 + 0.5 * Math.sin(twoPi * t / 3.2345);
+        this._model.setParameterValueByIndex(mindex, clamp(v, min, max));
+      }
+    }
+    /* 自然搖擺：以多個不可通分低頻正弦疊合成似隨機曲線，
+       產生極微幅的站姿重心微移，幅度由 idleSwayAmp 控制 */
+    _updateIdleSway(delta) {
+      this._swayT += delta;
+      const t = this._swayT;
+      const amp = this.idleSwayAmp;
+      const twoPi = 2 * Math.PI;
+      const x = amp * (0.55 * Math.sin(twoPi * t / 11.3 + 0.7) + 0.45 * Math.sin(twoPi * t / 7.9 + 2.3));
+      const y = amp * 0.4 * Math.sin(twoPi * t / 15.7 + 3);
+      const z = amp * (0.7 * Math.sin(twoPi * t / 13.1 + 1.2) + 0.3 * Math.sin(twoPi * t / 6.7 + 0.4));
+      this._clampedAdd(P.ParamAngleX, x);
+      this._clampedAdd(P.ParamAngleY, y);
+      this._clampedAdd(P.ParamAngleZ, z);
+    }
     foldLipsync(pending, delta) {
       if (!this.lipsyncActive) {
         this.lipsyncLevel = Math.max(0, this.lipsyncLevel - delta * 6);
@@ -15349,6 +15452,7 @@
       this.dragY = 0;
       this.commandQueue = [];
       this.lastCommandAt = 0;
+      this._lastTapAt = 0;
       this.lastTime = performance.now() / 1e3;
       this.modelRel = null;
       this.loadingRel = null;
@@ -15358,6 +15462,14 @@
       this.tabHidden = document.hidden;
       this.autoBreath = true;
       this.autoBlink = true;
+      this.idleSway = true;
+      this.breathAmp = 1;
+      this.breathFreq = 1;
+      this.swayAmp = 1;
+      this.lookFollow = true;
+      this.lookFlipX = false;
+      this.lookFlipY = false;
+      this.tapReact = true;
       this._initGl();
       this._bindEvents();
       this._initPoll();
@@ -15383,9 +15495,9 @@
     _bindEvents() {
       window.addEventListener("resize", () => this._resize());
       this.canvas.addEventListener("pointerdown", (e) => this._pointerDown(e));
-      this.canvas.addEventListener("pointermove", (e) => this._pointerMove(e));
-      this.canvas.addEventListener("pointerup", () => this._pointerUp());
-      this.canvas.addEventListener("pointercancel", () => this._pointerUp());
+      window.addEventListener("pointermove", (e) => this._pointerMove(e));
+      window.addEventListener("pointerup", (e) => this._pointerUp(e));
+      window.addEventListener("pointercancel", (e) => this._pointerUp(e));
       this.modelSelect.addEventListener("change", () => this._onModelChange());
       document.addEventListener("visibilitychange", () => {
         this.tabHidden = document.hidden;
@@ -15401,20 +15513,52 @@
       }
     }
     _pointerDown(e) {
-      this.canvas.setPointerCapture(e.pointerId);
+      try {
+        this.canvas.setPointerCapture(e.pointerId);
+      } catch (err) {
+      }
+      this._pressX = e.clientX;
+      this._pressY = e.clientY;
+      this._pressAt = performance.now() / 1e3;
       this._updateDrag(e);
     }
     _pointerMove(e) {
       this._updateDrag(e);
     }
-    _pointerUp() {
+    _pointerUp(e) {
+      const now = performance.now() / 1e3;
+      if (!this._pressAt) return;
+      const dx = Math.abs(e.clientX - this._pressX);
+      const dy = Math.abs(e.clientY - this._pressY);
+      const dt = now - this._pressAt;
+      this._pressAt = 0;
+      if (this.tapReact && this.userModel && dx <= 10 && dy <= 10 && dt <= 0.3) {
+        if (now - this._lastTapAt >= 0.6) {
+          this._lastTapAt = now;
+          const rect = this.canvas.getBoundingClientRect();
+          const lx = clamp((e.clientX - rect.left) / rect.width * 2 - 1, -1, 1);
+          const ly = clamp((e.clientY - rect.top) / rect.height * 2 - 1, -1, 1);
+          const zone = tapZone(lx, ly);
+          if (zone === "chestTouch") {
+            this.userModel.triggerChestBlush();
+          } else if (zone) {
+            this.userModel.applyMotionCmd({ name: zone });
+          }
+        }
+      }
     }
     _updateDrag(e) {
       const rect = this.canvas.getBoundingClientRect();
-      this.dragX = clamp((e.clientX - rect.left) / rect.width * 2 - 1, -1, 1);
-      this.dragY = clamp((e.clientY - rect.top) / rect.height * 2 - 1, -1, 1);
-      if (this.userModel) {
-        this.userModel.setDragging(this.dragX, this.dragY);
+      const w = rect.width;
+      const h = rect.height;
+      if (w <= 0 || h <= 0) return;
+      this.dragX = clamp((e.clientX - rect.left) / w * 2 - 1, -1, 1);
+      this.dragY = clamp((e.clientY - rect.top) / h * 2 - 1, -1, 1);
+      if (this.userModel && this.lookFollow) {
+        this.userModel.setDragging(
+          this.lookFlipX ? -this.dragX : this.dragX,
+          this.lookFlipY ? -this.dragY : this.dragY
+        );
       }
     }
     _showOverlay(text) {
@@ -15494,16 +15638,10 @@ ${err}`);
           );
           userModel.loadPose(poseBuffer, poseBuffer.byteLength);
         }
-        const breath = CubismBreath.create();
+        userModel._breathAmp = this.breathAmp;
+        userModel._breathFreq = this.breathFreq;
+        userModel.idleSwayAmp = this.swayAmp;
         const pi = pid;
-        breath.setParameters([
-          new BreathParameterData(pi(P.ParamAngleX), 0, 15, 6.5345, 0.5),
-          new BreathParameterData(pi(P.ParamAngleY), 0, 8, 3.5345, 0.5),
-          new BreathParameterData(pi(P.ParamAngleZ), 0, 10, 5.5345, 0.5),
-          new BreathParameterData(pi(P.ParamBodyAngleX), 0, 4, 15.5345, 0.5),
-          new BreathParameterData(pi(P.ParamBreath), 0.5, 0.5, 3.2345, 1)
-        ]);
-        userModel._breath = breath;
         const look = CubismLook.create();
         look.setParameters([
           new LookParameterData(pi(P.ParamAngleX), 30, 0, 0),
@@ -15532,6 +15670,11 @@ ${err}`);
         await this._loadNativeMotions(userModel, setting, dir);
         this.userModel = userModel;
         this.modelRel = rel;
+        userModel.idleSwayOn = this.idleSway;
+        userModel._breathAmp = this.breathAmp;
+        userModel._breathFreq = this.breathFreq;
+        userModel.idleSwayAmp = this.swayAmp;
+        userModel.lookFollow = this.lookFollow;
         this._hideOverlay();
       } catch (err) {
         this._showOverlay(`\u6A21\u578B\u8F09\u5165\u5931\u6557\uFF1A
@@ -15823,7 +15966,7 @@ ${err || "\u672A\u77E5\u932F\u8AA4"}
     });
     return b;
   }
-  function tpGroup(title) {
+  function tpGroup(title, collapsible) {
     const box = document.createElement("div");
     box.className = "tp-group";
     const h = document.createElement("div");
@@ -15833,7 +15976,40 @@ ${err || "\u672A\u77E5\u932F\u8AA4"}
     btns.className = "tp-btns";
     box.appendChild(h);
     box.appendChild(btns);
+    if (collapsible) {
+      box.classList.add("tp-collapse");
+      h.title = "\u6309\u4E00\u4E0B\u6536\u5408\uFF0F\u5C55\u958B";
+      h.addEventListener("click", () => btns.classList.toggle("hidden"));
+    }
     return { box, btns };
+  }
+  function tpSlider(label, get, set, min, max, step, fmt, apply) {
+    const row = document.createElement("div");
+    row.className = "tp-slider";
+    const lab = document.createElement("span");
+    lab.className = "tp-slider-label";
+    lab.textContent = label;
+    const inp = document.createElement("input");
+    inp.type = "range";
+    inp.min = String(min);
+    inp.max = String(max);
+    inp.step = String(step);
+    inp.value = String(get());
+    const disp = document.createElement("span");
+    disp.className = "tp-slider-val";
+    const render = () => {
+      disp.textContent = fmt ? fmt(get()) : String(get());
+    };
+    inp.addEventListener("input", () => {
+      set(Number(inp.value));
+      if (apply) apply();
+      render();
+    });
+    row.appendChild(lab);
+    row.appendChild(inp);
+    row.appendChild(disp);
+    render();
+    return row;
   }
   function initTestPanel(app2) {
     const body = document.getElementById("testpanel-body");
@@ -15871,6 +16047,62 @@ ${err || "\u672A\u77E5\u932F\u8AA4"}
     ctl.btns.appendChild(tpButton("\u505C\u6B62\u52D5\u4F5C", () => sendCommand("stop")));
     ctl.btns.appendChild(tpButton("\u5168\u90E8\u9084\u539F", () => sendCommand("reset")));
     body.appendChild(ctl.box);
+    const inter = tpGroup("\u4E92\u52D5", true);
+    inter.btns.appendChild(
+      tpToggle("\u8996\u7DDA\u8DDF\u96A8", () => app2.lookFollow, (v) => {
+        app2.lookFollow = v;
+        if (app2.userModel) app2.userModel.lookFollow = v;
+      })
+    );
+    inter.btns.appendChild(
+      tpToggle("\u9EDE\u64CA\u53CD\u61C9", () => app2.tapReact, (v) => {
+        app2.tapReact = v;
+      })
+    );
+    inter.btns.appendChild(
+      tpToggle("\u6C34\u5E73\u53CD\u8F49", () => app2.lookFlipX, (v) => {
+        app2.lookFlipX = v;
+      })
+    );
+    inter.btns.appendChild(
+      tpToggle("\u5782\u76F4\u53CD\u8F49", () => app2.lookFlipY, (v) => {
+        app2.lookFlipY = v;
+      })
+    );
+    const note = document.createElement("div");
+    note.className = "tp-note";
+    note.textContent = "\u6E38\u6A19\u96E2\u958B\u8996\u7A97\u5F8C\u8996\u7DDA\u505C\u5728\u6700\u5F8C\u65B9\u5411\uFF08\u700F\u89BD\u5668\u9650\u5236\uFF09\u3002";
+    inter.btns.appendChild(note);
+    body.appendChild(inter.box);
+    const tune = tpGroup("\u5FAE\u8ABF\uFF08\u547C\u5438\u8207\u6416\u64FA\uFF09", true);
+    tune.btns.appendChild(
+      tpToggle("\u81EA\u7136\u6416\u64FA", () => app2.idleSway, (v) => {
+        app2.idleSway = v;
+        if (app2.userModel) app2.userModel.idleSwayOn = v;
+      })
+    );
+    const syncTune = () => {
+      if (!app2.userModel) return;
+      app2.userModel._breathAmp = app2.breathAmp;
+      app2.userModel._breathFreq = app2.breathFreq;
+      app2.userModel.idleSwayAmp = app2.swayAmp;
+    };
+    tune.btns.appendChild(
+      tpSlider("\u547C\u5438\u5E45\u5EA6", () => app2.breathAmp, (v) => {
+        app2.breathAmp = v;
+      }, 0, 1.5, 0.05, (v) => Math.round(v * 100) + "%", syncTune)
+    );
+    tune.btns.appendChild(
+      tpSlider("\u547C\u5438\u983B\u7387", () => app2.breathFreq, (v) => {
+        app2.breathFreq = v;
+      }, 0.5, 2, 0.05, (v) => v.toFixed(2) + "\xD7", syncTune)
+    );
+    tune.btns.appendChild(
+      tpSlider("\u6416\u64FA\u5E45\u5EA6", () => app2.swayAmp, (v) => {
+        app2.swayAmp = v;
+      }, 0, 1.5, 0.05, (v) => Math.round(v * 100) + "%", syncTune)
+    );
+    body.appendChild(tune.box);
     const pgrp = tpGroup("\u53C3\u6578\u6E2C\u8A66");
     const datalist = document.createElement("datalist");
     datalist.id = "tp-param-suggest";
@@ -15904,7 +16136,7 @@ ${err || "\u672A\u77E5\u932F\u8AA4"}
   var canvas = document.getElementById("canvas");
   CubismFramework.startUp();
   CubismFramework.initialize();
-  var BUILD_TAG = "build-20260830-0900";
+  var BUILD_TAG = "build-20260830-1550";
   var verEl = document.getElementById("bundle-ver");
   if (verEl) {
     verEl.textContent = BUILD_TAG;
