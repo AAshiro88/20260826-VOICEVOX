@@ -98,5 +98,9 @@
   "msg_mem_none": "[Nothing new to remember]\n",
   "msg_mem_failed": "[Failed to save memory: {}]\n",
   "msg_mem_unavailable": "[Long-term memory is unavailable (chromadb missing or failed to initialize)]\n",
+  "btn_dolphin": "Use Dolphin",
+  "lbl_outline": "Outline",
+  "msg_dolphin_start": "[Dolphin routing: strong model plans → local render…]\n",
+  "msg_dolphin_fallback": "[Dolphin call failed ({}); replying with the normal model]\n",
   "chk_enable_3d": "Enable 3D performance"
 }

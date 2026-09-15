@@ -514,6 +514,41 @@ MEMORY_HEADERS = {
 # 模型輸出中代表「沒有可記憶內容」的關鍵字（依語言），出現即視為空結果
 MEMORY_NONE_TOKENS = ("無", "なし", "none")
 
+# Dolphin 分流（手動開關）：強模型規劃、本地 Ollama Dolphin 渲染。
+# 規劃指示只要求大綱不寫正文；渲染指示要求依大綱成文、不提規劃過程。
+PLAN_HINT = {
+    "ja": (
+        "\n\n【下書きの指示】この返答の「構成・要点・方向性」だけを日本語で"
+        "簡潔に箇条書きでまとめてください。本文を書かず、演出や強調表現も"
+        "不要です。"
+    ),
+    "zh": (
+        "\n\n【規劃指示】請只規劃這則回覆的「內容大綱、要點與方向」，"
+        "不要直接撰寫正文；以繁體中文簡潔條列即可。"
+    ),
+    "en": (
+        "\n\n[Planning instruction] Only outline the structure, key points and "
+        "direction for the reply. Do not write the actual message. Keep it in "
+        "English, using concise bullet points."
+    ),
+}
+RENDER_HINT = {
+    "ja": (
+        "あなたは大綱を実際の返答として書き出す役割です。"
+        "下記の大綱を自然な口語の日本語に展開してください。"
+        "計画の過程や大綱自体には言及せず、返答そのものだけを出力してください。"
+    ),
+    "zh": (
+        "你是負責把大綱渲染成完整回覆的角色。請根據大綱寫出自然口語的繁體中文回覆。"
+        "不要提及規劃過程或大綱本身，只輸出回覆正文。"
+    ),
+    "en": (
+        "You are the writer that turns the outline into the final reply. "
+        "Expand the outline into natural spoken English. Do not mention the "
+        "planning process or the outline; output only the reply itself."
+    ),
+}
+
 # 自動取標題的指示文字（標題語言跟隨對話語言）
 TITLE_ASKS = {
     "ja": (
@@ -859,6 +894,10 @@ class VoiceChatApp:
         self.voice_available = False
         self.model_name = ""
         self.provider = "ollama"
+        # Dolphin 分流（手動開關）：渲染階段一律使用本機 Ollama 的模型
+        self.dolphin_use_var = tk.BooleanVar(value=False)
+        self.dolphin_model = ""
+        self.dolphin_model_box = None
         # 對話語言屬於 chat 本身；UI_LANG 則只控制介面文字。
         self.convo_lang = UI_LANG
         self.restore_path = Path(restore_path) if restore_path else None
@@ -975,6 +1014,17 @@ class VoiceChatApp:
         self.lang_box.set(CONVO_LANG_NAMES[self.convo_lang])
         self.lang_box.pack(side="left", padx=(4, 0))
         self.lang_box.bind("<<ComboboxSelected>>", self.on_lang_selected)
+
+        # Dolphin 分流：開啟後下則回覆走「強模型規劃 → 本機 Ollama 渲染」
+        ttk.Checkbutton(
+            mid2, text=tr("btn_dolphin"), variable=self.dolphin_use_var,
+            command=self._on_dolphin_toggle,
+        ).pack(side="left", padx=(12, 2))
+        self.dolphin_model_box = ttk.Combobox(mid2, width=22, state="disabled")
+        self.dolphin_model_box.pack(side="left", padx=(0, 8))
+        self.dolphin_model_box.bind(
+            "<<ComboboxSelected>>", self.on_dolphin_model_selected
+        )
 
         ttk.Button(mid2, text=tr("btn_stop"), command=lambda: self.stop_speaking()).pack(
             side="right", padx=4
@@ -1157,6 +1207,9 @@ class VoiceChatApp:
                     self.ollama_models = msg[1]
                     if self.provider == "ollama":
                         self._apply_models()
+                    # Dolphin 渲染一律取自本機 Ollama 清單
+                    if self.dolphin_use_var.get():
+                        self._refresh_dolphin_models()
                 elif kind == "or_models":
                     self.openrouter_models = msg[1]
                     if self.provider == "openrouter":
@@ -1569,6 +1622,43 @@ class VoiceChatApp:
 
     def on_model_selected(self, event=None):
         self.model_name = self.model_box.get()
+
+    # ---------- Dolphin 分流設定（渲染階段一律使用本機 Ollama） ----------
+
+    def _on_dolphin_toggle(self):
+        """Dolphin 開關切換：啟用時載入 Ollama 模型清單並可編輯輸入。"""
+        if self.dolphin_model_box is None:
+            return
+        if self.dolphin_use_var.get():
+            self.dolphin_model_box.configure(state="normal")
+            self._refresh_dolphin_models()
+        else:
+            self.dolphin_model_box.configure(state="disabled")
+            self.dolphin_model = ""
+
+    def on_dolphin_model_selected(self, event=None):
+        """Dolphin 模型下拉選擇：記下所選（也可手動輸入自訂 tag）。"""
+        self.dolphin_model = (
+            self.dolphin_model_box.get().strip() if self.dolphin_model_box else ""
+        )
+
+    def _refresh_dolphin_models(self):
+        """把目前 Ollama 模型清單放入 Dolphin 下拉；保留手動輸入並預設 dolphin-llama3。"""
+        if self.dolphin_model_box is None:
+            return
+        models = list(self.ollama_models)
+        current = self.dolphin_model_box.get().strip()
+        if current and current not in models:
+            models.append(current)
+        self.dolphin_model_box.configure(values=models)
+        if not self.dolphin_model_box.get():
+            default = (
+                "dolphin-llama3"
+                if "dolphin-llama3" in models
+                else (models[0] if models else "")
+            )
+            self.dolphin_model_box.set(default)
+        self.dolphin_model = self.dolphin_model_box.get().strip()
 
     # ---------- 對話工作階段管理 ----------
 
@@ -2387,11 +2477,51 @@ class VoiceChatApp:
         memory_block = self.memory_block_for(user_text)
         if memory_block:
             system_prompt += memory_block
-        messages = [
-            {"role": "system", "content": system_prompt}
-        ] + llm_view(self.history, self.convo_lang)
+        history_view = llm_view(self.history, self.convo_lang)
+        messages = [{"role": "system", "content": system_prompt}] + history_view
         try:
-            reply = self.call_llm(messages)
+            # Dolphin 分流（手動開關）：強模型規劃大綱 → 本機 Ollama Dolphin 渲染
+            if self.dolphin_use_var.get() and self.dolphin_model.strip():
+                self._emit("text", tr("msg_dolphin_start"), "sys")
+                try:
+                    plan_hint = PLAN_HINT.get(self.convo_lang, PLAN_HINT["zh"])
+                    render_hint = RENDER_HINT.get(self.convo_lang, RENDER_HINT["zh"])
+                    outline = self.call_llm(
+                        [
+                            {
+                                "role": "system",
+                                "content": system_prompt + plan_hint,
+                            }
+                        ]
+                        + history_view,
+                        timeout=300,
+                    ).strip()
+                    reply = self.call_llm(
+                        [
+                            {"role": "system", "content": render_hint},
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"{tr('role_user')}：{user_text}\n\n"
+                                    f"{tr('lbl_outline')}：\n{outline}"
+                                ),
+                            },
+                        ],
+                        provider="ollama",
+                        model=self.dolphin_model.strip(),
+                        timeout=300,
+                    )
+                except Exception as e:
+                    # Dolphin 不可用（未下載模型、引擎未啟動等）時回退一般模型
+                    self._emit("text", tr("msg_dolphin_fallback").format(e), "sys")
+                    try:
+                        reply = self.call_llm(messages)
+                    except Exception as e2:
+                        self._emit("text", tr("msg_llm_failed").format(e2), "sys")
+                        self._emit("busy", False)
+                        return
+            else:
+                reply = self.call_llm(messages)
         except Exception as e:
             # 呼叫失敗時保留使用者訊息，不從歷史移除，
             # 讓「重新生成」可以直接重試該則訊息，而不會誤刪前一則已成功的回覆

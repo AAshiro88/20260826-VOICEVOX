@@ -98,5 +98,9 @@
   "msg_mem_none": "[沒有新的可記憶內容]\n",
   "msg_mem_failed": "[存入長期記憶失敗：{}]\n",
   "msg_mem_unavailable": "[長期記憶功能無法使用（chromadb 未安裝或初始化失敗）]\n",
+  "btn_dolphin": "用 Dolphin",
+  "lbl_outline": "大綱",
+  "msg_dolphin_start": "[Dolphin 分流中：強模型規劃 → 本機渲染…]\n",
+  "msg_dolphin_fallback": "[Dolphin 呼叫失敗（{}），改用一般模型回覆]\n",
   "chk_enable_3d": "啟用 3D 演出"
 }
