@@ -514,38 +514,69 @@ MEMORY_HEADERS = {
 # 模型輸出中代表「沒有可記憶內容」的關鍵字（依語言），出現即視為空結果
 MEMORY_NONE_TOKENS = ("無", "なし", "none")
 
-# Dolphin 分流（手動開關）：強模型規劃、本地 Ollama Dolphin 渲染。
-# 規劃指示只要求大綱不寫正文；渲染指示要求依大綱成文、不提規劃過程。
-PLAN_HINT = {
+# Dolphin 分流（手動開關）：強模型規劃「回覆指示」、本地 Ollama Dolphin 受限執行。
+# 導演（強模型）輸出要點／方向／限制內容／3D 的指示；執筆（Dolphin）
+# 只依指示在限制範圍內輸出正文，不需閱讀原始對話與歷史。
+DIRECT_HINT = {
     "ja": (
-        "\n\n【下書きの指示】この返答の「構成・要点・方向性」だけを日本語で"
-        "簡潔に箇条書きでまとめてください。本文を書かず、演出や強調表現も"
-        "不要です。"
+        "\n\n【返答指示】あなたは「監督」です。キャラクター設定と会話の流れに"
+        "基づき、執筆モデルが従える返答の指示を日本語で箇条書きで作成してください"
+        "（返答そのものは書かないでください）。必ず以下を含めてください：\n"
+        "1. 要点：この返答で伝える核心と順序。\n"
+        "2. 方向：口調・語気・冒頭の流れ・結び方。\n"
+        "3. 制限内容：この返答がカバーしてよい範囲・長さの上限・禁止事項"
+        "（脱線しない、相手の決定を代わりにしない、役を崩さない 等）。\n"
+        "4. 3D 指示：ふさわしい場合のみ [3d]{...}[/3d] 形式で表情・動作の指令を"
+        "付けてください（指令だけを書き、説明は不要）。"
     ),
     "zh": (
-        "\n\n【規劃指示】請只規劃這則回覆的「內容大綱、要點與方向」，"
-        "不要直接撰寫正文；以繁體中文簡潔條列即可。"
+        "\n\n【回覆指示】你是「導演」。請依據角色設定與對話脈絡，為執筆模型規劃"
+        "一則回覆的明確指示（不是回覆本身），以繁體中文簡潔條列，務必包含：\n"
+        "1. 要點：這則回覆要傳達的核心內容與順序。\n"
+        "2. 方向：語氣、語態、開頭走向與結尾方式。\n"
+        "3. 限制內容：明確列出這則回覆「只能涵蓋」的範圍、長度上限，以及"
+        "「禁止出現」的內容（例如不得離題、不得替使用者做決定、不得拆穿角色）。\n"
+        "4. 3D 指令：若適合，請以 [3d]{...}[/3d] 格式附上預設的表情／動作指令"
+        "（只列指令，不展開敘述）。"
     ),
     "en": (
-        "\n\n[Planning instruction] Only outline the structure, key points and "
-        "direction for the reply. Do not write the actual message. Keep it in "
-        "English, using concise bullet points."
+        "\n\n[Reply instruction] You are the director. Based on the persona and "
+        "conversation context, produce clear instructions for the writer model "
+        "to compose the reply (do NOT write the reply itself). Use concise "
+        "English bullet points and must include:\n"
+        "1. Key points: the core message of this reply and its order.\n"
+        "2. Direction: tone, voice, how to open and how to close.\n"
+        "3. Constraints: what this reply is ONLY allowed to cover, a length "
+        "limit, and what is forbidden (e.g. no digressing, never decide on the "
+        "user's behalf, never break character).\n"
+        "4. 3D directions: if fitting, attach expression/motion directives in "
+        "[3d]{...}[/3d] format (directives only, no prose)."
     ),
 }
-RENDER_HINT = {
+WRITER_HINT = {
     "ja": (
-        "あなたは大綱を実際の返答として書き出す役割です。"
-        "下記の大綱を自然な口語の日本語に展開してください。"
-        "計画の過程や大綱自体には言及せず、返答そのものだけを出力してください。"
+        "あなたは「執筆モデル」です。元の会話やキャラクター設定を読む必要は"
+        "ありません。以下の返答指示に従い、その「制限内容」の範囲内でのみ"
+        "返答本文を出力してください。範囲を超えて自由に書き足さないでください。"
+        "指示に [3d] ブロックが含まれる場合は原形のまま出力に残してください。"
+        "返答本文だけを出力し、自己紹介・説明・指示そのものへの言及は不要です。"
+        "指示と同じ言語で出力してください。"
     ),
     "zh": (
-        "你是負責把大綱渲染成完整回覆的角色。請根據大綱寫出自然口語的繁體中文回覆。"
-        "不要提及規劃過程或大綱本身，只輸出回覆正文。"
+        "你是「執筆模型」。你不需要閱讀原始對話或角色設定，只需依照下列「回覆指示」"
+        "輸出回覆正文，並只能在指示的「限制內容」允許範圍內成文，不得超出範圍"
+        "自由發揮。若指示含 [3d] 區塊，請原樣保留在輸出中。直接輸出回覆正文；"
+        "不要自我介紹、不要解釋、不要提及指示本身或規劃過程。以指示使用的語言輸出。"
     ),
     "en": (
-        "You are the writer that turns the outline into the final reply. "
-        "Expand the outline into natural spoken English. Do not mention the "
-        "planning process or the outline; output only the reply itself."
+        "You are the writer model. You do not need to read the original "
+        "conversation or persona. Compose the reply strictly according to the "
+        "following instructions and only within the scope allowed by their "
+        "'Constraints' section; do not improvise beyond them. If an instruction "
+        "contains a [3d] block, keep it verbatim in your output. Output only "
+        "the reply itself: no self-introduction, no explanation, and never "
+        "mention the instructions or the planning process. Use the same "
+        "language as the instructions."
     ),
 }
 
@@ -2480,17 +2511,17 @@ class VoiceChatApp:
         history_view = llm_view(self.history, self.convo_lang)
         messages = [{"role": "system", "content": system_prompt}] + history_view
         try:
-            # Dolphin 分流（手動開關）：強模型規劃大綱 → 本機 Ollama Dolphin 渲染
+            # Dolphin 分流（手動開關）：強模型規劃「回覆指示」→ 本機 Ollama Dolphin 受限執行
             if self.dolphin_use_var.get() and self.dolphin_model.strip():
                 self._emit("text", tr("msg_dolphin_start"), "sys")
                 try:
-                    plan_hint = PLAN_HINT.get(self.convo_lang, PLAN_HINT["zh"])
-                    render_hint = RENDER_HINT.get(self.convo_lang, RENDER_HINT["zh"])
-                    outline = self.call_llm(
+                    direct_hint = DIRECT_HINT.get(self.convo_lang, DIRECT_HINT["zh"])
+                    writer_hint = WRITER_HINT.get(self.convo_lang, WRITER_HINT["zh"])
+                    direction = self.call_llm(
                         [
                             {
                                 "role": "system",
-                                "content": system_prompt + plan_hint,
+                                "content": system_prompt + direct_hint,
                             }
                         ]
                         + history_view,
@@ -2498,13 +2529,11 @@ class VoiceChatApp:
                     ).strip()
                     reply = self.call_llm(
                         [
-                            {"role": "system", "content": render_hint},
+                            {"role": "system", "content": writer_hint},
                             {
+                                # Dolphin 只依指示輸出，不讀使用者原文與歷史
                                 "role": "user",
-                                "content": (
-                                    f"{tr('role_user')}：{user_text}\n\n"
-                                    f"{tr('lbl_outline')}：\n{outline}"
-                                ),
+                                "content": f"{tr('lbl_outline')}：\n{direction}",
                             },
                         ],
                         provider="ollama",
