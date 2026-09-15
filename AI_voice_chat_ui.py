@@ -1558,13 +1558,23 @@ class VoiceChatApp:
             return
         # 套用篩選（含 OpenRouter 預設只顯示 :free）
         self._refresh_model_list()
-        # 預設選擇第一個符合 PREFERRED 的項目，否則用第一個
+        # 預設選擇第一個符合 PREFERRED 的項目，否則用第一個；
+        # OpenRouter 固定優先預選 openrouter/free（字母序不一定排最前）。
         keys = PREFERRED_MODELS if self.provider == "ollama" else PREFERRED_OPENROUTER_MODELS
         visible = self.model_box["values"]
-        default_label = next(
-            (m for m in visible if any(key in m for key in keys)),
-            visible[0] if visible else "",
-        )
+        if self.provider == "openrouter":
+            default_label = next(
+                (m for m in visible if m == "openrouter/free"),
+                next(
+                    (m for m in visible if any(key in m for key in keys)),
+                    visible[0] if visible else "",
+                ),
+            )
+        else:
+            default_label = next(
+                (m for m in visible if any(key in m for key in keys)),
+                visible[0] if visible else "",
+            )
         if default_label:
             self.model_box.set(default_label)
         self.on_model_selected()
