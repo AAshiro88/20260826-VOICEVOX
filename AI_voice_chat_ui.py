@@ -525,9 +525,7 @@ DIRECT_HINT = {
         "1. 要点：この返答で伝える核心と順序。\n"
         "2. 方向：口調・語気・冒頭の流れ・結び方。\n"
         "3. 制限内容：この返答がカバーしてよい範囲・長さの上限・禁止事項"
-        "（脱線しない、相手の決定を代わりにしない、役を崩さない 等）。\n"
-        "4. 3D 指示：ふさわしい場合のみ [3d]{...}[/3d] 形式で表情・動作の指令を"
-        "付けてください（指令だけを書き、説明は不要）。"
+        "（脱線しない、相手の決定を代わりにしない、役を崩さない 等）。"
     ),
     "zh": (
         "\n\n【回覆指示】你是「導演」。請依據角色設定與對話脈絡，為執筆模型規劃"
@@ -535,9 +533,7 @@ DIRECT_HINT = {
         "1. 要點：這則回覆要傳達的核心內容與順序。\n"
         "2. 方向：語氣、語態、開頭走向與結尾方式。\n"
         "3. 限制內容：明確列出這則回覆「只能涵蓋」的範圍、長度上限，以及"
-        "「禁止出現」的內容（例如不得離題、不得替使用者做決定、不得拆穿角色）。\n"
-        "4. 3D 指令：若適合，請以 [3d]{...}[/3d] 格式附上預設的表情／動作指令"
-        "（只列指令，不展開敘述）。"
+        "「禁止出現」的內容（例如不得離題、不得替使用者做決定、不得拆穿角色）。"
     ),
     "en": (
         "\n\n[Reply instruction] You are the director. Based on the persona and "
@@ -548,8 +544,22 @@ DIRECT_HINT = {
         "2. Direction: tone, voice, how to open and how to close.\n"
         "3. Constraints: what this reply is ONLY allowed to cover, a length "
         "limit, and what is forbidden (e.g. no digressing, never decide on the "
-        "user's behalf, never break character).\n"
-        "4. 3D directions: if fitting, attach expression/motion directives in "
+        "user's behalf, never break character)."
+    ),
+}
+# 3D 演出啟用時才附加的導演指示行：要求導演把表情／動作指令放進回覆指示，
+# 避免 3D 關閉時仍規劃或輸出 [3d] 區塊。
+_3D_DIRECT_LINE = {
+    "ja": (
+        "\n4. 3D 指示：ふさわしい場合のみ [3d]{...}[/3d] 形式で表情・動作の指令を"
+        "付けてください（指令だけを書き、説明は不要）。"
+    ),
+    "zh": (
+        "\n4. 3D 指令：若適合，請以 [3d]{...}[/3d] 格式附上預設的表情／動作指令"
+        "（只列指令，不展開敘述）。"
+    ),
+    "en": (
+        "\n4. 3D directions: if fitting, attach expression/motion directives in "
         "[3d]{...}[/3d] format (directives only, no prose)."
     ),
 }
@@ -2516,6 +2526,11 @@ class VoiceChatApp:
                 self._emit("text", tr("msg_dolphin_start"), "sys")
                 try:
                     direct_hint = DIRECT_HINT.get(self.convo_lang, DIRECT_HINT["zh"])
+                    if self.enable_3d_var.get():
+                        # 僅 3D 演出啟用時才要求導演規劃指令，避免關閉時殘留 [3d]
+                        direct_hint += _3D_DIRECT_LINE.get(
+                            self.convo_lang, _3D_DIRECT_LINE["zh"]
+                        )
                     writer_hint = WRITER_HINT.get(self.convo_lang, WRITER_HINT["zh"])
                     direction = self.call_llm(
                         [
@@ -2558,8 +2573,8 @@ class VoiceChatApp:
             self._emit("busy", False)
             return
 
-        # 3D 指令抽取（僅在開關開啟時；指令區塊不顯示、不翻譯）
-        # 指令同時存入 assistant 訊息的 3d 欄位，供歷史重播與模型範例使用
+        # 3D 指令抽取：僅在開關開啟時發送；關閉時仍剝離意外殘留的 [3d] 區塊，
+        # 避免指令當成一般文字顯示或誤送翻譯。
         commands = []
         if self.enable_3d_var.get():
             commands, reply = split_3d(reply)
@@ -2568,6 +2583,8 @@ class VoiceChatApp:
                 params = c.get("params") if isinstance(c.get("params"), dict) else {}
                 send_3d_command(action, params)
                 self._report_viewer_status()
+        else:
+            _, reply = split_3d(reply)
 
         # 模型回覆只保留使用者語言；日文朗讀稿獨立存放，永不送回模型。
         conv, legacy_voice = reply_parts(reply, self.convo_lang)
