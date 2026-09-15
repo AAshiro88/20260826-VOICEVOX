@@ -514,6 +514,9 @@ MEMORY_HEADERS = {
 # 模型輸出中代表「沒有可記憶內容」的關鍵字（依語言），出現即視為空結果
 MEMORY_NONE_TOKENS = ("無", "なし", "none")
 
+# 翻譯引擎預設值："google"（deep-translator）或 "ollama"（本機 Ollama 模型）
+DEFAULT_TRANSLATION_PROVIDER = "google"
+
 # Dolphin 後製潤飾：強模型正常生成回覆後，由本機 Dolphin 依後製指示做詞彙／語氣潤飾。
 # 使用者請自行編輯下列常數填入後製指示（三語各一，不能全為空）；
 # Dolphin 依指示對強模型回覆自然融入指定詞彙，可微調句式但須保留原意口吻，
@@ -642,14 +645,18 @@ def assistant_conv_text(content, lang):
     return conv
 
 
-def translate_to_japanese(text, lang, retries=2):
-    """以 deep-translator 把中文或英文回覆轉成供 VOICEVOX 朗讀的日文。
+def translate_to_japanese(text, lang, retries=2, provider="google"):
+    """將中文或英文回覆轉成供 VOICEVOX 朗讀的日文。
 
-    使用 GoogleTranslator，失敗時自動重試。
+    provider="google"：使用 deep-translator GoogleTranslator；"ollama"：使用
+    本機 Ollama 模型。不做跨引擎降級，選哪個就走哪個。
     """
     text = (text or "").strip()
     if not text or lang == "ja":
         return text
+    if provider == "ollama":
+        return _translate_with_ollama(text, lang)
+    # Google 翻譯
     if GoogleTranslator is None:
         raise RuntimeError("找不到 deep-translator；請執行 pip install -r requirements.txt")
     source = {"zh": "zh-TW", "en": "en"}.get(lang, "auto")
@@ -665,6 +672,37 @@ def translate_to_japanese(text, lang, retries=2):
         if attempt < retries - 1:
             time.sleep(1)
     raise last_err
+
+
+# Ollama 翻譯設定
+OLLAMA_TRANSLATION_MODEL = "richardyoung/qwen2.5-7b-instruct-abliterated"
+_TRANSLATE_SYSTEM_PROMPT = {
+    "ja": "あなたは翻訳者です。以下のテキストを自然な日本語に翻訳してください。翻訳結果のみを出力し、説明や注釈は付けないでください。",
+    "zh": "你是翻譯員。請將以下文字翻成自然的日文，只輸出翻譯結果，不加任何說明。",
+    "en": "You are a translator. Translate the following text into natural Japanese. Output only the translation, no explanations.",
+}
+
+
+def _translate_with_ollama(text, lang):
+    """以本機 Ollama 模型將中文或英文翻譯成日文（不經 Google API）。"""
+    prompt = _TRANSLATE_SYSTEM_PROMPT.get(lang, _TRANSLATE_SYSTEM_PROMPT["zh"])
+    resp = post_json(
+        "/api/chat",
+        OLLAMA_URL,
+        payload={
+            "model": OLLAMA_TRANSLATION_MODEL,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text},
+            ],
+            "stream": False,
+        },
+        timeout=120,
+    )
+    result = json.loads(resp.decode("utf-8"))["message"]["content"].strip()
+    if not result:
+        raise RuntimeError("Ollama 翻譯未傳回結果")
+    return result
 
 
 def migrate_assistant_voices(history, lang):
@@ -990,7 +1028,17 @@ class VoiceChatApp:
         self.lang_box.pack(side="left", padx=(4, 0))
         self.lang_box.bind("<<ComboboxSelected>>", self.on_lang_selected)
 
-        # Dolphin 分流：開啟後下則回覆走「強模型規劃 → 本機 Ollama 渲染」
+        # 翻譯引擎切換（Google / Ollama），影響非日語回覆的日文朗讀稿
+        ttk.Label(mid2, text=tr("lbl_translate_engine")).pack(side="left", padx=(12, 0))
+        self.translate_engine_var = tk.StringVar(value=DEFAULT_TRANSLATION_PROVIDER)
+        self.translate_engine_box = ttk.Combobox(
+            mid2, state="readonly", width=10,
+            values=["google", "ollama"],
+            textvariable=self.translate_engine_var,
+        )
+        self.translate_engine_box.pack(side="left", padx=(4, 0))
+
+        # Dolphin 分流：強模型正常生成後由 Dolphin 做詞彙／語氣後製
         ttk.Checkbutton(
             mid2, text=tr("btn_dolphin"), variable=self.dolphin_use_var,
             command=self._on_dolphin_toggle,
@@ -1692,6 +1740,11 @@ class VoiceChatApp:
         # 還原 3D 演出開關（設定不觸發 _on_toggle_3d 的連線檢查）
         self.enable_3d_var.set(bool(session["enable_3d"]))
 
+        # 還原翻譯引擎（舊對話檔無此欄位時預設 google）
+        self.translate_engine_var.set(
+            session.get("translation_provider", DEFAULT_TRANSLATION_PROVIDER)
+        )
+
         # 還原服務與模型
         self.provider = provider
         self.provider_box.current(1 if provider == "openrouter" else 0)
@@ -1817,6 +1870,7 @@ class VoiceChatApp:
         self.current_session["lang"] = self.convo_lang
         self.current_session["persona"] = self.persona
         self.current_session["enable_3d"] = bool(self.enable_3d_var.get())
+        self.current_session["translation_provider"] = self.translate_engine_var.get()
         payload = json.dumps(self.current_session, ensure_ascii=False, indent=2)
         try:
             with self.file_lock:
@@ -2193,7 +2247,10 @@ class VoiceChatApp:
         def worker():
             try:
                 conv = self.history[target_idx]["content"]
-                voice = translate_to_japanese(conv, self.convo_lang)
+                voice = translate_to_japanese(
+                    conv, self.convo_lang,
+                    provider=self.translate_engine_var.get(),
+                )
                 self.history[target_idx]["voice"] = voice
                 self.write_session_file()
                 self._emit("retry_translate_done", target_idx, voice)
@@ -2520,7 +2577,9 @@ class VoiceChatApp:
         # 模型回覆只保留使用者語言；日文朗讀稿獨立存放，永不送回模型。
         conv, legacy_voice = reply_parts(reply, self.convo_lang)
         try:
-            voice = legacy_voice or translate_to_japanese(conv, self.convo_lang)
+            voice = legacy_voice or translate_to_japanese(
+                conv, self.convo_lang, provider=self.translate_engine_var.get()
+            )
         except Exception as e:
             # 翻譯服務失敗不能讓整個對話消失；保留文字回覆並略過朗讀。
             voice = ""

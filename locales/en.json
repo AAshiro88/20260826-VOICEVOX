@@ -103,5 +103,6 @@
   "msg_dolphin_start": "[Strong model generated → Dolphin postprocess…]\n",
   "msg_dolphin_fallback": "[Dolphin call failed ({}); replying with the normal model]\n",
   "msg_dolphin_skip": "[Dolphin postprocess prompt empty; skipping]\n",
-  "chk_enable_3d": "Enable 3D performance"
+  "chk_enable_3d": "Enable 3D performance",
+  "lbl_translate_engine": "Translate"
 }
