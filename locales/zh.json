@@ -104,5 +104,6 @@
   "msg_dolphin_fallback": "[Dolphin 呼叫失敗（{}），改用一般模型回覆]\n",
   "msg_dolphin_skip": "[Dolphin 後製提示詞為空，跳過 Dolphin 後製]\n",
   "chk_enable_3d": "啟用 3D 演出",
-  "lbl_translate_engine": "翻譯引擎"
+  "lbl_translate_engine": "翻譯引擎",
+  "lbl_translate_model": "翻譯模型"
 }

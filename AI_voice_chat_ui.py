@@ -645,17 +645,20 @@ def assistant_conv_text(content, lang):
     return conv
 
 
-def translate_to_japanese(text, lang, retries=2, provider="google"):
+def translate_to_japanese(
+    text, lang, retries=2, provider="google", ollama_model=None
+):
     """將中文或英文回覆轉成供 VOICEVOX 朗讀的日文。
 
     provider="google"：使用 deep-translator GoogleTranslator；"ollama"：使用
-    本機 Ollama 模型。不做跨引擎降級，選哪個就走哪個。
+    本機 Ollama 模型（ollama_model 指定實際模型，None 時用預設）。不做跨引擎
+    降級，選哪個就走哪個。
     """
     text = (text or "").strip()
     if not text or lang == "ja":
         return text
     if provider == "ollama":
-        return _translate_with_ollama(text, lang)
+        return _translate_with_ollama(text, lang, model=ollama_model)
     # Google 翻譯
     if GoogleTranslator is None:
         raise RuntimeError("找不到 deep-translator；請執行 pip install -r requirements.txt")
@@ -675,7 +678,9 @@ def translate_to_japanese(text, lang, retries=2, provider="google"):
 
 
 # Ollama 翻譯設定
-OLLAMA_TRANSLATION_MODEL = "richardyoung/qwen2.5-7b-instruct-abliterated"
+# 翻譯用模型（可在 UI 自選）；qwen2.5:7b 實測中文→日文最穩最快
+DEFAULT_TRANSLATION_MODEL = "qwen2.5:7b"
+OLLAMA_TRANSLATION_MODEL = DEFAULT_TRANSLATION_MODEL
 _TRANSLATE_SYSTEM_PROMPT = {
     "ja": "あなたは翻訳者です。以下のテキストを自然な日本語に翻訳してください。翻訳結果のみを出力し、説明や注釈は付けないでください。",
     "zh": "你是翻譯員。請將以下文字翻成自然的日文，只輸出翻譯結果，不加任何說明。",
@@ -683,19 +688,24 @@ _TRANSLATE_SYSTEM_PROMPT = {
 }
 
 
-def _translate_with_ollama(text, lang):
-    """以本機 Ollama 模型將中文或英文翻譯成日文（不經 Google API）。"""
+def _translate_with_ollama(text, lang, model=None):
+    """以本機 Ollama 模型將中文或英文翻譯成日文（不經 Google API）。
+
+    model 為 None 時使用 OLLAMA_TRANSLATION_MODEL。以 num_predict 上限與較低
+    temperature 控制輸出，避免模型跑野產生過長內容。
+    """
     prompt = _TRANSLATE_SYSTEM_PROMPT.get(lang, _TRANSLATE_SYSTEM_PROMPT["zh"])
     resp = post_json(
         "/api/chat",
         OLLAMA_URL,
         payload={
-            "model": OLLAMA_TRANSLATION_MODEL,
+            "model": model or OLLAMA_TRANSLATION_MODEL,
             "messages": [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": text},
             ],
             "stream": False,
+            "options": {"num_predict": 400, "temperature": 0.3},
         },
         timeout=120,
     )
@@ -911,6 +921,9 @@ class VoiceChatApp:
         self.dolphin_use_var = tk.BooleanVar(value=False)
         self.dolphin_model = ""
         self.dolphin_model_box = None
+        # 翻譯引擎用的 Ollama 模型（可自選，切到 google 時停用）
+        self.translate_model = ""
+        self.translate_model_box = None
         # 對話語言屬於 chat 本身；UI_LANG 則只控制介面文字。
         self.convo_lang = UI_LANG
         self.restore_path = Path(restore_path) if restore_path else None
@@ -1037,6 +1050,15 @@ class VoiceChatApp:
             textvariable=self.translate_engine_var,
         )
         self.translate_engine_box.pack(side="left", padx=(4, 0))
+        self.translate_engine_box.bind(
+            "<<ComboboxSelected>>", self._on_translate_provider_changed
+        )
+        # 翻譯模型下拉（選 ollama 時才可編輯，可手動輸入自訂 tag）
+        self.translate_model_box = ttk.Combobox(mid2, width=20, state="disabled")
+        self.translate_model_box.pack(side="left", padx=(4, 0))
+        self.translate_model_box.bind(
+            "<<ComboboxSelected>>", self.on_translate_model_selected
+        )
 
         # Dolphin 分流：強模型正常生成後由 Dolphin 做詞彙／語氣後製
         ttk.Checkbutton(
@@ -1233,6 +1255,9 @@ class VoiceChatApp:
                     # Dolphin 渲染一律取自本機 Ollama 清單
                     if self.dolphin_use_var.get():
                         self._refresh_dolphin_models()
+                    # 翻譯引擎若選 ollama，同步更新翻譯模型下拉
+                    if self.translate_engine_var.get() == "ollama":
+                        self._refresh_translate_models()
                 elif kind == "or_models":
                     self.openrouter_models = msg[1]
                     if self.provider == "openrouter":
@@ -1659,6 +1684,42 @@ class VoiceChatApp:
             self.dolphin_model_box.configure(state="disabled")
             self.dolphin_model = ""
 
+    # ---------- 翻譯引擎設定（Google / Ollama，Ollama 可自選模型） ----------
+
+    def _on_translate_provider_changed(self, event=None):
+        """翻譯引擎切換：選 ollama 時啟用模型下拉並載入清單。"""
+        if self.translate_model_box is None:
+            return
+        if self.translate_engine_var.get() == "ollama":
+            self.translate_model_box.configure(state="normal")
+            self._refresh_translate_models()
+        else:
+            self.translate_model_box.configure(state="disabled")
+
+    def on_translate_model_selected(self, event=None):
+        """翻譯模型下拉選擇：記下所選（也可手動輸入自訂 tag）。"""
+        self.translate_model = (
+            self.translate_model_box.get().strip() if self.translate_model_box else ""
+        )
+
+    def _refresh_translate_models(self):
+        """把目前 Ollama 模型清單放入翻譯模型下拉；保留手動輸入並預設 qwen2.5:7b。"""
+        if self.translate_model_box is None:
+            return
+        models = list(self.ollama_models)
+        current = self.translate_model_box.get().strip()
+        if current and current not in models:
+            models.append(current)
+        self.translate_model_box.configure(values=models)
+        if not self.translate_model_box.get():
+            default = (
+                DEFAULT_TRANSLATION_MODEL
+                if DEFAULT_TRANSLATION_MODEL in models
+                else (models[0] if models else "")
+            )
+            self.translate_model_box.set(default)
+        self.translate_model = self.translate_model_box.get().strip()
+
     def on_dolphin_model_selected(self, event=None):
         """Dolphin 模型下拉選擇：記下所選（也可手動輸入自訂 tag）。"""
         self.dolphin_model = (
@@ -1744,6 +1805,16 @@ class VoiceChatApp:
         self.translate_engine_var.set(
             session.get("translation_provider", DEFAULT_TRANSLATION_PROVIDER)
         )
+        # 依引擎啟用／停用翻譯模型下拉，並還原自選的 Ollama 模型
+        self._on_translate_provider_changed()
+        saved_tmodel = session.get("translation_model", "")
+        if (
+            self.translate_engine_var.get() == "ollama"
+            and saved_tmodel
+            and self.translate_model_box is not None
+        ):
+            self.translate_model_box.set(saved_tmodel)
+            self.translate_model = saved_tmodel
 
         # 還原服務與模型
         self.provider = provider
@@ -1871,6 +1942,7 @@ class VoiceChatApp:
         self.current_session["persona"] = self.persona
         self.current_session["enable_3d"] = bool(self.enable_3d_var.get())
         self.current_session["translation_provider"] = self.translate_engine_var.get()
+        self.current_session["translation_model"] = self.translate_model
         payload = json.dumps(self.current_session, ensure_ascii=False, indent=2)
         try:
             with self.file_lock:
@@ -2250,6 +2322,7 @@ class VoiceChatApp:
                 voice = translate_to_japanese(
                     conv, self.convo_lang,
                     provider=self.translate_engine_var.get(),
+                    ollama_model=self.translate_model,
                 )
                 self.history[target_idx]["voice"] = voice
                 self.write_session_file()
@@ -2578,7 +2651,8 @@ class VoiceChatApp:
         conv, legacy_voice = reply_parts(reply, self.convo_lang)
         try:
             voice = legacy_voice or translate_to_japanese(
-                conv, self.convo_lang, provider=self.translate_engine_var.get()
+                conv, self.convo_lang, provider=self.translate_engine_var.get(),
+                ollama_model=self.translate_model,
             )
         except Exception as e:
             # 翻譯服務失敗不能讓整個對話消失；保留文字回覆並略過朗讀。

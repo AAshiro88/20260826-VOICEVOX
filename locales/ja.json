@@ -104,5 +104,6 @@
   "msg_dolphin_fallback": "[Dolphin の呼び出しに失敗（{}）、通常モデルで返答します]\n",
   "msg_dolphin_skip": "[Dolphin ポストプロセス提示が空のためスキップします]\n",
   "chk_enable_3d": "3D 演出を有効化",
-  "lbl_translate_engine": "翻訳エンジン"
+  "lbl_translate_engine": "翻訳エンジン",
+  "lbl_translate_model": "翻訳モデル"
 }
