@@ -155,6 +155,72 @@ class MemoryStore:
         except Exception:
             pass
 
+    def list_facts(self, chat_id):
+        """列出某對話已儲存的記憶，回傳 [(id, 事實文字, metadata), ...]。
+
+        保留 id 供「檢視／編輯／刪除」對話框定位單筆記憶。
+        """
+        if not self.enabled:
+            return []
+        try:
+            res = self._col.get(
+                where={"chat_id": chat_id},
+                include=["documents", "metadatas"],
+            )
+            ids = res.get("ids") or []
+            docs = res.get("documents") or []
+            metas = res.get("metadatas") or []
+            return [
+                (i, doc, (m or {}))
+                for i, doc, m in zip(ids, docs, metas)
+                if doc
+            ]
+        except Exception:
+            return []
+
+    def delete_fact(self, chat_id, fact_id):
+        """刪除某對話的一則記憶；不存在或失敗時靜默略過。"""
+        if not self.enabled or not fact_id:
+            return
+        try:
+            self._col.delete(ids=[fact_id])
+        except Exception:
+            pass
+
+    def update_fact(self, chat_id, fact_id, new_text):
+        """更新一則記憶的文字並重新整理 embedding。
+
+        文字太短或與其他筆記憶重複時不更新（排除自己）。回傳更新後的文字，
+        未更新時回傳 None。
+        """
+        if not self.enabled or not fact_id:
+            return None
+        fact = clean_fact(new_text)
+        if not fact or len(fact) < MIN_FACT_LEN:
+            return None
+        target = None
+        others = []
+        for i, doc, meta in self.list_facts(chat_id):
+            if i == fact_id:
+                target = (i, doc, meta)
+            else:
+                others.append((i, doc, meta))
+        if target is None:
+            return None
+        if any(self._similar(fact, old) for _i, old, _m in others):
+            return None
+        try:
+            meta = dict(target[2])
+            meta["created_at"] = now_iso()
+            self._col.update(
+                ids=[fact_id],
+                documents=[fact],
+                metadatas=[meta],
+            )
+            return fact
+        except Exception:
+            return None
+
     @staticmethod
     def _similar(a, b):
         """以字元比例相似度判斷兩則事實是否重複。"""

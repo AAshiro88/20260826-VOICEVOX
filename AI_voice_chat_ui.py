@@ -1126,6 +1126,10 @@ class VoiceChatApp:
         self.delete_btn.pack(side="left")
         self.memory_btn = ttk.Button(srow, text=tr("btn_memory"), command=self.save_memory_manual)
         self.memory_btn.pack(side="left", padx=(8, 4))
+        self.memory_view_btn = ttk.Button(
+            srow, text=tr("btn_memory_view"), command=self.show_memory_manager
+        )
+        self.memory_view_btn.pack(side="left", padx=(0, 4))
 
         self.chat = scrolledtext.ScrolledText(
             self.root, state="disabled", wrap="word", font=("Microsoft JhengHei", 11)
@@ -2550,6 +2554,99 @@ class VoiceChatApp:
         facts = [fact for _dist, fact in hits]
         block = MEMORY_HEADERS.get(self.convo_lang, MEMORY_HEADERS["zh"])
         return block + "\n".join(f"- {f}" for f in facts) + "\n"
+
+    def show_memory_manager(self):
+        """開啟記憶管理對話框：檢視、修改、刪除目前對話的長期記憶。"""
+        chat_id = self._current_chat_id()
+        if self.memory_store is None or not self.memory_store.enabled or not chat_id:
+            self._append(tr("msg_mem_unavailable"), "sys")
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.title(tr("dlg_memory_title"))
+        dlg.transient(self.root)
+        dlg.geometry("560x420")
+        # 置中
+        dlg.update_idletasks()
+        x = (dlg.winfo_screenwidth() - dlg.winfo_width()) // 2
+        y = (dlg.winfo_screenheight() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{x}+{y}")
+
+        frm = ttk.Frame(dlg, padding=10)
+        frm.pack(fill="both", expand=True)
+
+        listbox = tk.Listbox(frm, font=("Microsoft JhengHei", 10))
+        listbox.pack(fill="both", expand=True, pady=(0, 6))
+        sb = ttk.Scrollbar(listbox, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+
+        editor = tk.Entry(frm, font=("Microsoft JhengHei", 11))
+        editor.pack(fill="x", pady=(0, 8))
+
+        def refresh():
+            listbox.delete(0, "end")
+            items = self.memory_store.list_facts(chat_id)
+            for _i, doc, _m in items:
+                listbox.insert("end", doc)
+            if not items:
+                listbox.insert("end", tr("dlg_memory_empty"))
+            return items
+
+        def on_select(_e=None):
+            items = self.memory_store.list_facts(chat_id)
+            sel = listbox.curselection()
+            if not sel or sel[0] >= len(items):
+                return
+            editor.delete(0, "end")
+            editor.insert(0, items[sel[0]][1])
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+
+        def do_update():
+            items = self.memory_store.list_facts(chat_id)
+            sel = listbox.curselection()
+            if not sel or sel[0] >= len(items):
+                self._append(tr("msg_mem_select_first"), "sys")
+                return
+            new_text = editor.get().strip()
+            if not new_text:
+                self._append(tr("msg_mem_select_first"), "sys")
+                return
+            if self.memory_store.update_fact(chat_id, items[sel[0]][0], new_text):
+                self._append(tr("msg_mem_updated"), "sys")
+            else:
+                self._append(tr("msg_mem_update_failed"), "sys")
+            refresh()
+
+        def do_delete():
+            items = self.memory_store.list_facts(chat_id)
+            sel = listbox.curselection()
+            if not sel or sel[0] >= len(items):
+                self._append(tr("msg_mem_select_first"), "sys")
+                return
+            self.memory_store.delete_fact(chat_id, items[sel[0]][0])
+            self._append(tr("msg_mem_deleted"), "sys")
+            editor.delete(0, "end")
+            refresh()
+
+        refresh()
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+        ttk.Button(btns, text=tr("btn_mem_close"), command=dlg.destroy).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(btns, text=tr("btn_mem_delete"), command=do_delete).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(btns, text=tr("btn_mem_update"), command=do_update).pack(side="right")
+        # Esc 關閉、Enter 更新
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        editor.bind("<Return>", lambda e: do_update())
+        editor.focus_set()
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
 
     def save_memory_manual(self):
         """把目前載入對話的全部內容抽成長期記憶（使用者手動觸發）。"""
