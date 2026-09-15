@@ -646,7 +646,7 @@ def assistant_conv_text(content, lang):
 
 
 def translate_to_japanese(
-    text, lang, retries=2, provider="google", ollama_model=None
+    text, lang, retries=3, provider="google", ollama_model=None
 ):
     """將中文或英文回覆轉成供 VOICEVOX 朗讀的日文。
 
@@ -659,7 +659,7 @@ def translate_to_japanese(
         return text
     if provider == "ollama":
         return _translate_with_ollama(text, lang, model=ollama_model)
-    # Google 翻譯
+    # Google 翻譯（rate limit 保護：指數退避重試）
     if GoogleTranslator is None:
         raise RuntimeError("找不到 deep-translator；請執行 pip install -r requirements.txt")
     source = {"zh": "zh-TW", "en": "en"}.get(lang, "auto")
@@ -673,7 +673,7 @@ def translate_to_japanese(
         except Exception as exc:
             last_err = exc
         if attempt < retries - 1:
-            time.sleep(1)
+            time.sleep(1.5 * (2 ** attempt))  # 1.5s, 3s 退避
     raise last_err
 
 
@@ -715,17 +715,20 @@ def _translate_with_ollama(text, lang, model=None):
     return result
 
 
-def migrate_assistant_voices(history, lang):
+def migrate_assistant_voices(history, lang, provider=None, ollama_model=None):
     """將舊對話紀錄遷移為單語 content 加獨立 voice 欄位。
 
     早期紀錄把模型自行產生的 jp 與回覆文字一起塞在 JSON ``content``。
     載入這類紀錄時，非日語回覆會重新交由 deep-translator 翻成日文，
     不沿用舊的 jp 欄位，確保朗讀稿的來源一致。
 
+    provider 可指定 "google" 或 "ollama"，None 時依序嘗試 ollama 後 google。
     回傳 ``(changed, errors)``；個別翻譯失敗時保留原紀錄，避免遺失對話。
     """
     changed = False
     errors = []
+    # Google rate limit 保護：連續呼叫間距至少 0.25 秒
+    last_call_time = 0
     for message in history:
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
@@ -740,7 +743,14 @@ def migrate_assistant_voices(history, lang):
         if not conv:
             continue
         try:
-            voice = translate_to_japanese(conv, lang)
+            # Google rate limit：每次呼叫間至少 250ms
+            elapsed = time.time() - last_call_time
+            if elapsed < 0.25:
+                time.sleep(0.25 - elapsed)
+            voice = translate_to_japanese(
+                conv, lang, provider=provider, ollama_model=ollama_model
+            )
+            last_call_time = time.time()
         except Exception as e:
             errors.append(str(e))
             continue
@@ -1790,8 +1800,15 @@ class VoiceChatApp:
 
         # 將舊版 assistant JSON 轉成新版單語 content + voice。這也讓舊對話
         # 的日文朗讀稿確實由 deep-translator 產生，而非沿用模型附帶的 jp。
+        # 使用對話檔記錄的翻譯引擎（或沿用 ollama 若該對話檔有選擇）。
+        _session_provider = session.get(
+            "translation_provider", DEFAULT_TRANSLATION_PROVIDER
+        )
+        _session_tmodel = session.get("translation_model", "")
         migrated, migration_errors = migrate_assistant_voices(
-            self.history, session["lang"]
+            self.history, session["lang"],
+            provider=_session_provider,
+            ollama_model=_session_tmodel or DEFAULT_TRANSLATION_MODEL,
         )
 
         self._clear_chat_display()
