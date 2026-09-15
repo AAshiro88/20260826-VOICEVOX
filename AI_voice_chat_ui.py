@@ -1041,11 +1041,15 @@ class VoiceChatApp:
         self.lang_box.pack(side="left", padx=(4, 0))
         self.lang_box.bind("<<ComboboxSelected>>", self.on_lang_selected)
 
+        # 第三列：翻譯引擎（Google / Ollama，Ollama 可自選模型）＋ Dolphin 後製＋停止朗讀
+        mid3 = ttk.Frame(self.root, padding=(6, 2))
+        mid3.pack(fill="x")
+
         # 翻譯引擎切換（Google / Ollama），影響非日語回覆的日文朗讀稿
-        ttk.Label(mid2, text=tr("lbl_translate_engine")).pack(side="left", padx=(12, 0))
+        ttk.Label(mid3, text=tr("lbl_translate_engine")).pack(side="left")
         self.translate_engine_var = tk.StringVar(value=DEFAULT_TRANSLATION_PROVIDER)
         self.translate_engine_box = ttk.Combobox(
-            mid2, state="readonly", width=10,
+            mid3, state="readonly", width=10,
             values=["google", "ollama"],
             textvariable=self.translate_engine_var,
         )
@@ -1054,24 +1058,24 @@ class VoiceChatApp:
             "<<ComboboxSelected>>", self._on_translate_provider_changed
         )
         # 翻譯模型下拉（選 ollama 時才可編輯，可手動輸入自訂 tag）
-        self.translate_model_box = ttk.Combobox(mid2, width=20, state="disabled")
-        self.translate_model_box.pack(side="left", padx=(4, 0))
+        self.translate_model_box = ttk.Combobox(mid3, width=20, state="disabled")
+        self.translate_model_box.pack(side="left", padx=(8, 0))
         self.translate_model_box.bind(
             "<<ComboboxSelected>>", self.on_translate_model_selected
         )
 
         # Dolphin 分流：強模型正常生成後由 Dolphin 做詞彙／語氣後製
         ttk.Checkbutton(
-            mid2, text=tr("btn_dolphin"), variable=self.dolphin_use_var,
+            mid3, text=tr("btn_dolphin"), variable=self.dolphin_use_var,
             command=self._on_dolphin_toggle,
-        ).pack(side="left", padx=(12, 2))
-        self.dolphin_model_box = ttk.Combobox(mid2, width=22, state="disabled")
+        ).pack(side="left", padx=(16, 2))
+        self.dolphin_model_box = ttk.Combobox(mid3, width=22, state="disabled")
         self.dolphin_model_box.pack(side="left", padx=(0, 8))
         self.dolphin_model_box.bind(
             "<<ComboboxSelected>>", self.on_dolphin_model_selected
         )
 
-        ttk.Button(mid2, text=tr("btn_stop"), command=lambda: self.stop_speaking()).pack(
+        ttk.Button(mid3, text=tr("btn_stop"), command=lambda: self.stop_speaking()).pack(
             side="right", padx=4
         )
 
