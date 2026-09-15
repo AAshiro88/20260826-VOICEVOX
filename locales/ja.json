@@ -99,8 +99,9 @@
   "msg_mem_failed": "[長期記憶の保存に失敗：{}]\n",
   "msg_mem_unavailable": "[長期記憶機能を利用できません（chromadb がないか、初期化に失敗しました）]\n",
   "btn_dolphin": "Dolphin を使う",
-  "lbl_outline": "返答指示",
-  "msg_dolphin_start": "[Dolphin 分割中：強モデルが指示を計画 → ローカル描画…]\n",
+  "lbl_outline": "原文",
+  "msg_dolphin_start": "[強モデル生成 → Dolphin ポストプロセス…]\n",
   "msg_dolphin_fallback": "[Dolphin の呼び出しに失敗（{}）、通常モデルで返答します]\n",
+  "msg_dolphin_skip": "[Dolphin ポストプロセス提示が空のためスキップします]\n",
   "chk_enable_3d": "3D 演出を有効化"
 }
