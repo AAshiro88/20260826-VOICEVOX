@@ -37,6 +37,7 @@
   "btn_cancel": "Cancel",
   "provider_local": "Ollama (local)",
   "msg_engine_down": "Cannot connect to the VOICEVOX engine. Start VOICEVOX.exe and reopen this program.\n\n",
+  "msg_voice_off": "(The VOICEVOX engine is not running: replies will be shown as text only, without speech)\n",
   "msg_no_voices": "Preferred voices not found (Nekotsuka Bi, SAYO, Mochiko).\nMake sure your VOICEVOX install includes these characters.\n\n",
   "msg_switched_provider": "[Switched service: {}]\n",
   "msg_selected_voice": "[Selected voice: {}]\n",
@@ -92,5 +93,10 @@
   "msg_nothing_retry_translate": "[No reply to re-translate]\n",
   "msg_nothing_retry": "[Nothing to retry]\n",
   "msg_busy_retry": "[Wait for current reply]\n",
+  "btn_memory": "Save memory",
+  "msg_mem_saved": "[{} item(s) saved to long-term memory]\n",
+  "msg_mem_none": "[Nothing new to remember]\n",
+  "msg_mem_failed": "[Failed to save memory: {}]\n",
+  "msg_mem_unavailable": "[Long-term memory is unavailable (chromadb missing or failed to initialize)]\n",
   "chk_enable_3d": "Enable 3D performance"
 }

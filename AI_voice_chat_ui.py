@@ -51,6 +51,12 @@ try:
 except ImportError:
     GoogleTranslator = None
 
+# 長期記憶庫：缺失或載入失敗時記憶功能自動停用，不影響對話主流程。
+try:
+    import memory_store
+except Exception:
+    memory_store = None
+
 ENGINE_URL = "http://127.0.0.1:50021"
 OLLAMA_URL = "http://127.0.0.1:11434"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
@@ -467,6 +473,47 @@ SUMMARY_HEADERS = {
     "en": "Summary of the earlier conversation:\n",
 }
 
+# 長期記憶抽取的指示（輸出語言跟隨對話語言）：要求逐行列出不重複的事實
+MEMORY_ASKS = {
+    "ja": (
+        "以下の人間とAIの対話記録から、長期的に覚えておく価値のある事実・"
+        "好み・決定・約束を抽出してください。1行に1つ、完全な文で日本語で"
+        "出力してください。見出しや序文・説明は付けず、重複を避けてください。"
+        "取り上げる内容がなければ「なし」だけを出力してください。\n\n"
+    ),
+    "zh": (
+        "請從以下人機對話紀錄中，抽取值得長期記住的重要事實、個人偏好、"
+        "決定與約定。每條一行、每行一個完整的繁體中文句子。不要輸出標題、"
+        "前言或說明；不要重複；如果沒有值得記住的內容，只輸出「無」。\n\n"
+    ),
+    "en": (
+        "Extract facts, preferences, decisions and promises from the following "
+        "human-AI conversation that are worth remembering long-term. Output one "
+        "complete sentence per line in English. Do not add headings, preface or "
+        "explanations; avoid duplicates. If there is nothing worth remembering, "
+        "output only \"none\".\n\n"
+    ),
+}
+
+# 檢索到過往記憶時，附加到系統提示結尾的開頭與規則（輸出語言跟隨對話語言）
+MEMORY_HEADERS = {
+    "ja": (
+        "\n\n【過去の記憶（参考情報。今回の会話と無関係なら無視し、"
+        "捏造せず、繰り返さないこと）】\n"
+    ),
+    "zh": (
+        "\n\n【過往記憶（僅供參考；與本次對話無關時請忽略，"
+        "不可編造，也不需重複背誦）】\n"
+    ),
+    "en": (
+        "\n\n[Past memories (reference only. Ignore them when irrelevant to the "
+        "current topic; do not fabricate, do not repeat them back)]\n"
+    ),
+}
+
+# 模型輸出中代表「沒有可記憶內容」的關鍵字（依語言），出現即視為空結果
+MEMORY_NONE_TOKENS = ("無", "なし", "none")
+
 # 自動取標題的指示文字（標題語言跟隨對話語言）
 TITLE_ASKS = {
     "ja": (
@@ -796,8 +843,20 @@ class VoiceChatApp:
         root.minsize(900, 650)
 
         self.ui_queue = queue.Queue()
+
+        # 長期記憶庫：載入失敗時不阻擋主流程，記憶功能自動停用
+        if memory_store is not None:
+            try:
+                self.memory_store = memory_store.MemoryStore(get_base_dir())
+            except Exception:
+                self.memory_store = None
+        else:
+            self.memory_store = None
+
         self.history = []  # 目前對話的訊息列表（與 current_session["history"] 同一物件）
         self.speaker_id = None
+        # VOICEVOX 引擎是否可用；未啟動時以純文字回答、不朗讀
+        self.voice_available = False
         self.model_name = ""
         self.provider = "ollama"
         # 對話語言屬於 chat 本身；UI_LANG 則只控制介面文字。
@@ -956,6 +1015,8 @@ class VoiceChatApp:
         self.rename_btn.pack(side="left", padx=(0, 4))
         self.delete_btn = ttk.Button(srow, text=tr("btn_delete"), command=self.delete_selected_session)
         self.delete_btn.pack(side="left")
+        self.memory_btn = ttk.Button(srow, text=tr("btn_memory"), command=self.save_memory_manual)
+        self.memory_btn.pack(side="left", padx=(8, 4))
 
         self.chat = scrolledtext.ScrolledText(
             self.root, state="disabled", wrap="word", font=("Microsoft JhengHei", 11)
@@ -1117,7 +1178,7 @@ class VoiceChatApp:
                     self.busy = msg[1]
                     state = "disabled" if self.busy else "normal"
                     self.send_button.configure(state=state)
-                    for btn in (self.new_btn, self.load_btn, self.rename_btn, self.delete_btn, self.retry_btn, self.retry_translate_btn):
+                    for btn in (self.new_btn, self.load_btn, self.rename_btn, self.delete_btn, self.memory_btn, self.retry_btn, self.retry_translate_btn):
                         btn.configure(state=state)
                 elif kind == "retry_translate_done":
                     target_idx, voice = msg[1], msg[2]
@@ -1149,19 +1210,24 @@ class VoiceChatApp:
 
     def init_backend(self):
         """背景檢查各服務並載入清單，最後還原上次的對話。"""
-        # 檢查引擎並載入聲音清單
+        # 檢查引擎並載入聲音清單；引擎未啟動時改為純文字模式（不朗讀）
         try:
             version = http_json("/version", ENGINE_URL)
             self._emit("engine_ok", f"{tr('conn_ok')}（{version}）")
             speakers = http_json("/speakers", ENGINE_URL)
+            self.voice_available = True
         except Exception:
             self._emit("engine_ng", tr("conn_ng"))
-            self._emit("text", tr("msg_engine_down"), "sys")
+            self.voice_available = False
             speakers = []
 
         voices = self._collect_voices(speakers)
         if not voices:
-            self._emit("text", tr("msg_no_voices"), "sys")
+            # 引擎未連線時提示純文字模式；連線但沒有聲音才提示缺聲音
+            if self.voice_available:
+                self._emit("text", tr("msg_no_voices"), "sys")
+            else:
+                self._emit("text", tr("msg_voice_off"), "sys")
         self._emit("voices", voices)
         # 已知常用類型先立刻顯示人工校對譯名，不必等網路翻譯。
         builtin_translations = dict(VOICE_STYLE_TRANSLATIONS.get(UI_LANG, {}))
@@ -1824,6 +1890,12 @@ class VoiceChatApp:
         except Exception as e:
             self._append(tr("msg_delete_failed").format(e), "sys")
             return
+        # 對話檔案刪除時一併清除該對話的長期記憶
+        if self.memory_store is not None and self.memory_store.enabled:
+            try:
+                self.memory_store.delete_chat(memory_store.MemoryStore.chat_id(path))
+            except Exception:
+                pass
         if self.current_path == path:
             self.current_session = None
             self.current_path = None
@@ -1964,9 +2036,7 @@ class VoiceChatApp:
         if self.current_session is None:
             self._append(tr("msg_need_session"), "sys")
             return
-        if self.speaker_id is None:
-            self._append(tr("msg_need_engine"), "sys")
-            return
+        # VOICEVOX 引擎未啟動時不擋訊息：LLM 照常回覆，僅跳過朗讀（speak 內處理）
         if not self.model_name:
             self._append(tr("msg_need_model"), "sys")
             return
@@ -2186,8 +2256,112 @@ class VoiceChatApp:
             ]
             + self.history[-KEEP_RECENT_MESSAGES:]
         )
+        # 被摘要掉的舊對話順手抽成長期記憶；失敗不阻擋既有摘要流程
+        chat_id = self._current_chat_id()
+        if chat_id:
+            try:
+                self._run_memory_extract(
+                    chat_id, transcript, self.convo_lang, "auto"
+                )
+            except Exception:
+                pass
         self.write_session_file()
         self._emit("text", tr("msg_summary_done"), "sys")
+
+    # ---------- 長期記憶（chroma_db） ----------
+
+    def _current_chat_id(self):
+        """回傳目前對話的隔離鍵（檔案 stem）；沒有對話或記憶庫不可用時回傳 None。"""
+        if self.current_path is None or memory_store is None:
+            return None
+        try:
+            return memory_store.MemoryStore.chat_id(self.current_path)
+        except Exception:
+            return None
+
+    def extract_memories(self, transcript, lang):
+        """呼叫目前模型從對話文字抽取可長期記憶的事實，回傳事實清單。
+
+        失敗或結果為空時回傳空清單（呼叫端自行決定後續行為）。
+        """
+        ask = MEMORY_ASKS.get(lang, MEMORY_ASKS["zh"]) + transcript
+        text = self.call_llm([{"role": "user", "content": ask}], timeout=120)
+        facts = []
+        for line in text.splitlines():
+            fact = " ".join(line.strip().lstrip("-•·　*# ").split())
+            if not fact:
+                continue
+            if fact in MEMORY_NONE_TOKENS or fact.casefold() == "none":
+                continue
+            facts.append(fact)
+        return facts
+
+    def _run_memory_extract(self, chat_id, transcript, lang, source):
+        """抽取事實並寫入記憶庫；回傳實際新增筆數（失敗或不可用為 0）。"""
+        if (
+            self.memory_store is None
+            or not self.memory_store.enabled
+            or not chat_id
+            or not transcript.strip()
+        ):
+            return 0
+        facts = self.extract_memories(transcript, lang)
+        if not facts:
+            return 0
+        return self.memory_store.add_facts(chat_id, facts, lang, source)
+
+    def memory_block_for(self, query):
+        """依使用者訊息檢索目前對話的過往記憶，回傳可附加的提示文字。
+
+        無記憶或失敗時回傳空字串；僅在背景執行緒（chat_worker）中呼叫。
+        """
+        chat_id = self._current_chat_id()
+        if self.memory_store is None or not chat_id:
+            return ""
+        hits = self.memory_store.retrieve(chat_id, query)
+        if not hits:
+            return ""
+        facts = [fact for _dist, fact in hits]
+        block = MEMORY_HEADERS.get(self.convo_lang, MEMORY_HEADERS["zh"])
+        return block + "\n".join(f"- {f}" for f in facts) + "\n"
+
+    def save_memory_manual(self):
+        """把目前載入對話的全部內容抽成長期記憶（使用者手動觸發）。"""
+        if self.busy:
+            return
+        if self.current_session is None or self.current_path is None:
+            self._append(tr("msg_need_session"), "sys")
+            return
+        if self.memory_store is None or not self.memory_store.enabled:
+            self._append(tr("msg_mem_unavailable"), "sys")
+            return
+        self._emit("busy", True)
+        threading.Thread(target=self._memory_worker, daemon=True).start()
+
+    def _memory_worker(self):
+        """手動記憶的背景執行緒：組對話文字 → 抽取事實 → 寫入並回報。"""
+        chat_id = self._current_chat_id()
+        self.stop_requested = True
+        winsound.PlaySound(None, winsound.SND_PURGE)
+        view = llm_view(self.history, self.convo_lang, include_stage=False)
+        transcript = "\n".join(
+            f"{tr('role_user') if m.get('role') == 'user' else 'AI'}：{m.get('content', '')}"
+            for m in view
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+        )
+        try:
+            saved = self._run_memory_extract(
+                chat_id, transcript, self.convo_lang, "manual"
+            )
+        except Exception as e:
+            self._emit("text", tr("msg_mem_failed").format(e), "sys")
+            self._emit("busy", False)
+            return
+        if saved:
+            self._emit("text", tr("msg_mem_saved").format(saved), "sys")
+        else:
+            self._emit("text", tr("msg_mem_none"), "sys")
+        self._emit("busy", False)
 
     def chat_worker(self, user_text, append_user=True):
         """處理一次完整的對話回合：摘要檢查 → 呼叫模型 → 存檔 → 朗讀。
@@ -2207,9 +2381,14 @@ class VoiceChatApp:
         # 歷史過長先整理（期間忙碌鎖維持，無法送出新訊息）
         self.maybe_summarize()
 
-        # 送模型前先轉成對話語言視圖，朗讀用的日文行不佔 token
+        # 送模型前先轉成對話語言視圖，朗讀用的日文行不佔 token；
+        # 檢索到的過往記憶附加到系統提示結尾（僅供參考）
+        system_prompt = self.build_system_prompt()
+        memory_block = self.memory_block_for(user_text)
+        if memory_block:
+            system_prompt += memory_block
         messages = [
-            {"role": "system", "content": self.build_system_prompt()}
+            {"role": "system", "content": system_prompt}
         ] + llm_view(self.history, self.convo_lang)
         try:
             reply = self.call_llm(messages)
@@ -2304,9 +2483,12 @@ class VoiceChatApp:
     def speak(self, text):
         """逐句合成並同步播放；可由停止按鈕中斷。傳入文字為朗讀用日文。
 
+        VOICEVOX 引擎未啟動（或無可用聲音）時直接略過，不影響已顯示的文字回覆。
         3D 演出開啟時，同步送出口型指令（speak 開始／結束），
         中途停止也會在 finally 中送出結束指令。
         """
+        if not self.voice_available or self.speaker_id is None:
+            return
         lipsync_3d = self.enable_3d_var.get()
         if lipsync_3d:
             send_3d_command("lipsync", {"active": True})
@@ -2333,6 +2515,8 @@ class VoiceChatApp:
                         timeout=120,
                     )
                 except Exception as e:
+                    # 引擎中途關閉：停止後續嘗試，改回純文字回應
+                    self.voice_available = False
                     self._emit("text", tr("msg_tts_failed").format(e), "sys")
                     return
                 seq += 1

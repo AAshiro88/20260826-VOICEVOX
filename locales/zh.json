@@ -37,6 +37,7 @@
   "btn_cancel": "取消",
   "provider_local": "Ollama（本機）",
   "msg_engine_down": "無法連線 VOICEVOX 引擎。請先啟動 VOICEVOX.exe 後重新開啟本程式。\n\n",
+  "msg_voice_off": "（VOICEVOX 引擎未啟動，將僅以文字回覆，不朗讀）\n",
   "msg_no_voices": "找不到偏好的 3 個聲音（猫使ビィ、小夜/SAYO、もち子さん）。\n請確認 VOICEVOX 已安裝這些角色語音。\n\n",
   "msg_switched_provider": "[已切換服務：{}]\n",
   "msg_selected_voice": "[已選擇聲音 {}]\n",
@@ -92,5 +93,10 @@
   "msg_nothing_retry_translate": "[沒有需要重新翻譯的回覆]\n",
   "msg_nothing_retry": "[沒有可重新生成的回覆]\n",
   "msg_busy_retry": "[請先等待目前回覆完成]\n",
+  "btn_memory": "存入記憶",
+  "msg_mem_saved": "[已將 {} 則內容存入長期記憶]\n",
+  "msg_mem_none": "[沒有新的可記憶內容]\n",
+  "msg_mem_failed": "[存入長期記憶失敗：{}]\n",
+  "msg_mem_unavailable": "[長期記憶功能無法使用（chromadb 未安裝或初始化失敗）]\n",
   "chk_enable_3d": "啟用 3D 演出"
 }

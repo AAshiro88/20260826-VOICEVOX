@@ -22,6 +22,9 @@ CubismSdkForWeb-5-r.5/Samples/
 # 對話紀錄（個人隱私）
 chats/
 
+# 長期記憶庫（個人隱私）
+chroma_db/
+
 # npm 依賴與建置產物
 live2d_viewer/app_files/node_modules/
 live2d_viewer/web/viewer.bundle.js.map

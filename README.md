@@ -16,6 +16,7 @@
 - **自動命名**：新對話先以時間戳命名，第一則回覆後由 AI 自動取標題（標題語言跟隨對話語言），之後可手動改名；允許多個對話同名（清單自動加編號區分）
 - **角色設定**：自訂 AI 人設（例如「傲嬌的妹妹」），可透過「編輯」按鈕開啟多行對話框輸入完整角色描述（含範本載入），跟著對話一起存在 chats/*.json，載入對話即還原人設
 - **歷史自動摘要**：對話過長時自動呼叫目前模型整理成重點摘要＋保留最近數則原文（摘要輸入同樣只取對話語言）；整理中暫停接受新訊息
+- **長期記憶（chroma_db）**：將對話中的重要事實以向量庫儲存（本機 ONNX embedding，不需 API），分「自動」與「手動」兩種寫入：「存入記憶」按鈕可隨時把目前對話抽成長期記憶；歷史觸發自動摘要時，被壓縮掉的舊對話也會順手抽成記憶。以「對話檔」為隔離單位，未來回覆前會檢索該對話自己的過往記憶並附在系統提示中供模型參考（屬參考資訊，與話題無關時一律忽略）
 - **雙語顯示**：中文／English 模式下，AI 以「對話語言（主要行）＋日文朗讀行（灰色底線）」顯示，看得到也聽得到
 - **重新生成**：AI 回覆不滿意或格式壞掉時，按「重新生成」按鈕移除最後一則回覆並重新呼叫模型生成
 - **3D 角色演出（Live2D）**：勾選「啟用 3D 演出」後，系統提示會注入 3D 指令格式說明，模型可依對話內容輸出 `[3d]{json}[/3d]` 指令，驅動 `start_viewer.bat` 開啟的 3D 檢視器（表情／動作／參數控制／口型同步）；指令不會顯示在對話、不會翻譯、也不會存入歷史。檢視器另支援滑鼠互動（視線跟隨、點擊部位反應）與呼吸／自然搖擺的幅度微調
@@ -26,6 +27,7 @@
 ```
 20260826-VOICEVOX/
 ├─ AI_voice_chat_ui.py      主程式（Tkinter 圖形介面）
+├─ memory_store.py          長期記憶庫（chroma_db 向量儲存封裝）
 ├─ ollama_voice_chat.py     舊版純命令列介面（僅支援 Ollama，保留備用）
 ├─ voicevox_api_test.py     VOICEVOX 引擎 API 連通測試腳本
 ├─ locales/                 介面多國語系
@@ -40,7 +42,8 @@
 ├─ 3D/                      Live2D 模型資料夾（掃描 *.model3.json；不入版控，clone 後自行放入）
 ├─ CubismSdkForWeb-5-r.5/   Live2D Cubism Web SDK r.5（版控僅收 Framework/ 與 Core/，官方 Samples/ 不納入）
 ├─ .env                     OPENROUTER_API_KEY（金鑰，不上 GIT）
-└─ chats/                   對話紀錄（chat_日期_時間_毫秒.json，含角色設定；屬個人隱私，不入版控）
+├─ chats/                   對話紀錄（chat_日期_時間_毫秒.json，含角色設定；屬個人隱私，不入版控）
+└─ chroma_db/               長期記憶庫（含 chroma.sqlite3 與向量索引，首次寫入時自動建立；不入版控）
 ```
 
 ## 環境需求
@@ -48,7 +51,7 @@
 | 項目 | 說明 |
 |------|------|
 | 作業系統 | Windows 10 以上（使用 winsound 播放音訊） |
-| Python | 3.8 以上（開發環境為 Anaconda） |
+| Python | 3.9 以上（開發環境為 Anaconda Python 3.13.9；`chromadb` 需要較新版本） |
 | VOICEVOX | [產品版 0.25.2](https://voicevox.hiroshiba.jp/)（`voicevox-windows-directml-0.25.2.zip`），啟動後引擎自動監聽 `127.0.0.1:50021` |
 | 對話來源 | Ollama（本機）或 OpenRouter API 金鑰（擇一即可） |
 | 3D 演出（選用） | Live2D 模型放 `3D/`（資料夾未入版控）；建置前端需 Node.js；通常使用 Chrome／Edge／Firefox 開啟檢視器 |
@@ -61,7 +64,9 @@
 pip install -r requirements.txt
 ```
 
-若使用 Anaconda，請以實際啟動程式的同一個 Python 執行上述指令，確保能找到 `deep-translator`。
+若使用 Anaconda，請以實際啟動程式的同一個 Python 執行上述指令，確保能找到 `deep-translator` 與 `chromadb`。
+
+> 長期記憶使用 chroma 內建的 ONNX embedding 模型（`all-MiniLM-L6-v2`），**首次抽取記憶時**會在系統使用者快取目錄（`%USERPROFILE%\.cache\chroma\onnx_models\`）自動下載約 80MB 的模型，之後離線使用；下載失敗時該次記憶寫入會自動略過，下次對話重試，不影響語音對話。
 
 ## 事前準備
 
@@ -107,7 +112,7 @@ C:\ProgramData\Anaconda3\python.exe AI_voice_chat_ui.py
 | 聲音列 | Provider 切換 → 角色 Combobox（偏好 3 個角色優先顯示，取消勾選「偏好」展開全部）→ 風格 Combobox（對應角色的朗讀風格）→ 偏好篩選 checkbox |
 | 模型列 | 模型 Combobox（可編輯+即時篩選，右側有文字輸入框可過濾關鍵字）→ 介面語言切換（保留目前 chat 的語言）→ 停止朗讀 |
 | 角色列 | 單行摘要 Entry（width=18）→「編輯」按鈕開啟多行對話框 →「套用」按鈕或 Enter 套用角色；右側為「啟用 3D 演出」開關 |
-| 對話列 | 開新對話（綁定目前語言）／載入／改名／刪除；**清單只顯示目前語言的對話** |
+| 對話列 | 開新對話（綁定目前語言）／載入／改名／刪除／存入記憶；**清單只顯示目前語言的對話** |
 | 輸入區 | Enter 送出、Shift+Enter 換行 |
 
 其他腳本：
@@ -151,7 +156,7 @@ python ollama_voice_chat.py
 | `start_viewer.bat` | 雙擊啟動 3D 檢視器伺服器（自動找 Anaconda Python，自動開瀏覽器） |
 | `build_exe.bat` | 以 PyInstaller 打包成單一執行檔 `dist\AI_VoiceChat_UI.exe` |
 
-打包注意：**`.env`、`chats/`、`locales/` 不會被封裝進 exe**。程式在打包模式（frozen）下會改以 exe 所在資料夾作為基底目錄，因此使用 exe 前請手動把 `.env` 與 `locales/` 複製到 `dist\` 旁；`chats\` 會在首次存檔時自動建立在 exe 旁。
+打包注意：**`.env`、`chats/`、`locales/` 不會被封裝進 exe**。程式在打包模式（frozen）下會改以 exe 所在資料夾作為基底目錄，因此使用 exe 前請手動把 `.env` 與 `locales/` 複製到 `dist\` 旁；`chats\` 與 `chroma_db\` 會在首次存檔時自動建立在 exe 旁。ONNX embedding 模型快取於系統使用者目錄（`%USERPROFILE%\.cache\chroma\`），不隨 exe 分發。
 
 ## 對話檔案格式
 
@@ -192,7 +197,7 @@ python ollama_voice_chat.py
 
 ## 程式架構
 
-`AI_voice_chat_ui.py` 是單一檔案程式，使用 Python 標準庫加上 `deep-translator`，主要區塊如下：
+`AI_voice_chat_ui.py` 是主程式，使用 Python 標準庫加上 `deep-translator`、`chromadb`（長期記憶），`memory_store.py` 封裝 chroma_db 的讀寫；主要區塊如下：
 
 ```text
 AI_voice_chat_ui.py
@@ -205,6 +210,8 @@ AI_voice_chat_ui.py
 ├─ 3D 檢視器整合     viewer_alive() / send_3d_command() / split_3d()（[3d] JSON 指令抽取與發送）
 ├─ 回覆與翻譯        reply_parts() / assistant_conv_text() / llm_view()
 │                    translate_to_japanese()（deep-translator）
+├─ 長期記憶          memory_store.py（MemoryStore：add_facts / retrieve / facts_for / delete_chat）
+│                    ─ chroma_db 向量儲存，以對話檔名為隔離鍵，首次寫入時下載 ONNX embedding 模型
 ├─ 其他純函式        split_sentences() / sanitize_filename() / clean_title()
 │                    new_chat_filename() / scan_chat_files()
 ├─ PREFERRED_SPEAKERS / _PERSONA_TEMPLATE
@@ -221,6 +228,8 @@ AI_voice_chat_ui.py
 │   ├─ 角色設定       apply_persona() / build_system_prompt() / open_persona_editor()
 │   │                 / _on_toggle_3d() / _check_viewer_3d()
 │   ├─ 訊息流程       send_message() / _on_return() / retry_last() / chat_worker()
+│   ├─ 長期記憶       extract_memories() / _run_memory_extract() / memory_block_for()
+│   │                 / save_memory_manual() / _memory_worker()
 │   ├─ 後台工作       call_llm() / maybe_summarize() / auto_title_worker() / speak()
 │   └─ 停止與重播     stop_speaking() / replay_message()
 └─ main() + 啟動錯誤記錄（startup_error.log）
@@ -229,7 +238,7 @@ AI_voice_chat_ui.py
 ### 執行緒模型
 
 - **主執行緒**：Tkinter 事件迴圈，並以 `_poll_queue()` 每 100ms 輪詢 `ui_queue`。
-- **背景執行緒**：`chat_worker()`、`speak()`、`init_backend()`、`auto_title_worker()`、`maybe_summarize()` 都在工作執行緒執行。
+- **背景執行緒**：`chat_worker()`、`speak()`、`init_backend()`、`auto_title_worker()`、`maybe_summarize()`、`_memory_worker()`（手動存記憶）都在工作執行緒執行。
 - **關鍵規則**：背景執行緒不直接操作 Tk 元件，一律透過 `self._emit()` 把訊息塞進 `ui_queue`，由主執行緒的 `_poll_queue()` 依型別處理，避免跨執行緒 UI 存取造成的競態與崩潰。
 
 ### 佇列訊息型別（ui_queue）
@@ -249,7 +258,8 @@ AI_voice_chat_ui.py
 ```
 使用者在輸入框送出訊息（send_message）
   → 背景執行緒 chat_worker()
-      → 歷史過長先 maybe_summarize()（壓縮舊訊息）
+      → 以使用者訊息檢索該對話的長期記憶，命中時附加到系統提示（僅供參考）
+      → 歷史過長先 maybe_summarize()（壓縮舊訊息；被壓縮的部分順手抽成長期記憶）
       → call_llm() 呼叫 Ollama 或 OpenRouter
       → （3D 開啟時）split_3d() 抽取 [3d] 指令 → send_3d_command() 送往檢視器，
          指令區塊從正文移除（不顯示、不翻譯、不入歷史）
@@ -307,6 +317,7 @@ AI_voice_chat_ui.py
 - `VOICEVOX/`、`voicevox_engine-master/`、各壓縮檔——龐大的二進位資產（`VOICEVOX/` 為語音引擎執行檔資料夾）
 - `3D/`——模型資產過大且含第三方版權模型（Felis、Gothic、March 7th 等）；clone 後請自行放入要用的 Live2D 模型
 - `chats/`——對話紀錄含人設與逐字稿，屬個人隱私
+- `chroma_db/`——長期記憶庫（含向量索引與 chroma.sqlite3），屬個人隱私
 - `CubismSdkForWeb-5-r.5/Samples/`——官方 Demo 範例，檢視器不需要
 - `CubismSdkForWeb-5-r.5.zip`、`live2d_viewer/app_files/node_modules/`、`live2d_viewer/web/viewer.bundle.js.map`——壓縮檔、npm 依賴與建置 sourcemap
 - `__pycache__/`、`*.pyc`
