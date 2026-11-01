@@ -60,6 +60,7 @@ except Exception:
 ENGINE_URL = "http://127.0.0.1:50021"
 OLLAMA_URL = "http://127.0.0.1:11434"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
+NVIDIA_URL = "https://integrate.api.nvidia.com/v1"
 
 # 3D 檢視器（Live2D）整合：本機伺服器位址與短逾時，避免影響對話流程
 VIEWER_URL = "http://127.0.0.1:8767"
@@ -161,6 +162,8 @@ def load_locale(lang):
 
 # OpenRouter API 金鑰；請自行在 .env 填入，勿提交到版本控制
 OPENROUTER_API_KEY = load_env(ENV_PATH).get("OPENROUTER_API_KEY", "")
+# NVIDIA API 金鑰；請自行在 .env 填入，勿提交到版本控制
+NVIDIA_API_KEY = load_env(ENV_PATH).get("NVIDIA_API_KEY", "")
 
 # 目前介面／對話語言（zh=繁體中文、ja=日本語、en=English）。
 # 不存於 .env：每次啟動由語言選擇視窗指定（預設帶入最新聊天紀錄的語言），
@@ -939,6 +942,7 @@ class VoiceChatApp:
         self.restore_path = Path(restore_path) if restore_path else None
         self.ollama_models = []
         self.openrouter_models = []
+        self.nvidia_models = []
         self.busy = False
         self.stop_requested = False
 
@@ -992,6 +996,11 @@ class VoiceChatApp:
         self.or_status = ttk.Label(top, text=(tr("checking") if OPENROUTER_API_KEY else key_hint), foreground="#b26a00")
         self.or_status.pack(side="left")
 
+        ttk.Label(top, text=tr("status_nvidia")).pack(side="left")
+        nvidia_key_hint = tr("key_loaded") if NVIDIA_API_KEY else tr("key_missing")
+        self.nvidia_status = ttk.Label(top, text=(tr("checking") if NVIDIA_API_KEY else nvidia_key_hint), foreground="#b26a00")
+        self.nvidia_status.pack(side="left")
+
         ttk.Label(top, text=tr("status_viewer")).pack(side="left", padx=(16, 0))
         self.viewer_status = ttk.Label(top, text=tr("checking"), foreground="#b26a00")
         self.viewer_status.pack(side="left")
@@ -1002,7 +1011,7 @@ class VoiceChatApp:
         ttk.Label(mid, text=tr("lbl_provider")).pack(side="left")
         self.provider_box = ttk.Combobox(
             mid, state="readonly", width=15,
-            values=[tr("provider_local"), "OpenRouter"],
+            values=[tr("provider_local"), "OpenRouter", "NVIDIA"],
         )
         self.provider_box.current(0)
         self.provider_box.pack(side="left", padx=(4, 16))
@@ -1258,6 +1267,10 @@ class VoiceChatApp:
                     self.or_status.configure(text=msg[1], foreground="#1a7f37")
                 elif kind == "or_ng":
                     self.or_status.configure(text=msg[1], foreground="#c62828")
+                elif kind == "nvidia_ok":
+                    self.nvidia_status.configure(text=msg[1], foreground="#1a7f37")
+                elif kind == "nvidia_ng":
+                    self.nvidia_status.configure(text=msg[1], foreground="#c62828")
                 elif kind == "viewer3d_ok":
                     self.viewer_status.configure(text=msg[1], foreground="#1a7f37")
                 elif kind == "viewer3d_ng":
@@ -1279,6 +1292,10 @@ class VoiceChatApp:
                 elif kind == "or_models":
                     self.openrouter_models = msg[1]
                     if self.provider == "openrouter":
+                        self._apply_models()
+                elif kind == "nvidia_models":
+                    self.nvidia_models = msg[1]
+                    if self.provider == "nvidia":
                         self._apply_models()
                 elif kind == "sessions":
                     # msg：names, paths(dict name->str), select_name
@@ -1391,6 +1408,22 @@ class VoiceChatApp:
         except Exception:
             self._emit("or_ng", tr("list_failed"))
             self._emit("or_models", [])
+
+        # 檢查 NVIDIA API 並載入模型清單（公開端點，需金鑰）
+        if not NVIDIA_API_KEY:
+            self._emit("nvidia_ng", tr("key_missing"))
+        try:
+            data = http_json("/models", NVIDIA_URL, timeout=20)
+            ids = sorted(m["id"] for m in data.get("data", []))
+            self._emit(
+                "nvidia_ok",
+                tr("available")
+                + (tr("paren_key") if NVIDIA_API_KEY else tr("paren_nokey")),
+            )
+            self._emit("nvidia_models", ids)
+        except Exception:
+            self._emit("nvidia_ng", tr("list_failed"))
+            self._emit("nvidia_models", [])
 
         # 掃描目前介面語言的既有對話，準備還原最近使用的。
         # 介面語言切換時，--chat 會指定繼續開啟原 chat，即使其語言不同。
@@ -1551,7 +1584,8 @@ class VoiceChatApp:
         """依目前服務來源填入模型完整清單，套用目前篩選與預設選擇。"""
         self._all_model_list = (
             list(self.ollama_models) if self.provider == "ollama"
-            else list(self.openrouter_models)
+            else list(self.openrouter_models) if self.provider == "openrouter"
+            else list(self.nvidia_models)
         )
         # Ollama 也允許手動輸入（不再鎖 readonly，方便打字篩選）
         self.model_box.configure(state="normal")
@@ -1625,7 +1659,12 @@ class VoiceChatApp:
 
     def on_provider_selected(self, event=None, announce=True):
         provider = self.provider_box.get()
-        self.provider = "openrouter" if "OpenRouter" in provider else "ollama"
+        if "NVIDIA" in provider:
+            self.provider = "nvidia"
+        elif "OpenRouter" in provider:
+            self.provider = "openrouter"
+        else:
+            self.provider = "ollama"
         if announce:
             self._append(tr("msg_switched_provider").format(provider), "sys")
         self._apply_models()
@@ -1790,7 +1829,7 @@ class VoiceChatApp:
             return
 
         provider = data.get("provider")
-        if provider not in ("ollama", "openrouter"):
+        if provider not in ("ollama", "openrouter", "nvidia"):
             provider = "ollama"
         history = data.get("history")
         if not isinstance(history, list):
@@ -2422,6 +2461,18 @@ class VoiceChatApp:
                 timeout=timeout,
             )
             return json.loads(resp.decode("utf-8"))["message"]["content"]
+        if use_provider == "nvidia":
+            resp = post_json(
+                "/chat/completions",
+                NVIDIA_URL,
+                payload={"model": use_model, "messages": messages},
+                headers={
+                    # 金鑰只存在記憶體中傳遞，不寫入任何輸出
+                    "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                },
+                timeout=timeout,
+            )
+            return json.loads(resp.decode("utf-8"))["choices"][0]["message"]["content"]
         resp = post_json(
             "/chat/completions",
             OPENROUTER_URL,
@@ -2695,6 +2746,10 @@ class VoiceChatApp:
         """
         if self.provider == "openrouter" and not OPENROUTER_API_KEY:
             self._emit("text", tr("msg_no_key"), "sys")
+            self._emit("busy", False)
+            return
+        if self.provider == "nvidia" and not NVIDIA_API_KEY:
+            self._emit("text", tr("msg_no_nvidia_key"), "sys")
             self._emit("busy", False)
             return
 

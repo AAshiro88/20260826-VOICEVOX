@@ -1,6 +1,6 @@
-# VOICEVOX × Ollama／OpenRouter 語音對話工具
+# VOICEVOX × Ollama／OpenRouter／NVIDIA API 語音對話工具
 
-以本地語音合成（VOICEVOX）搭配大型語言模型（本機 Ollama 或 OpenRouter 雲端 API）的圖形介面對話程式。AI 回覆會自動朗讀，支援多重對話管理、角色設定，對話語言可選日本語／中文／English，介面文字亦提供三語切換。已內建 **Live2D 3D 演出**：開啟「啟用 3D 演出」後，AI 會在回覆時輸出 `[3d]` 指令，驅動另一視窗中的 3D 角色做表情、動作與口型同步。
+以本地語音合成（VOICEVOX）搭配大型語言模型（本機 Ollama、OpenRouter 雲端 API 或 NVIDIA API）的圖形介面對話程式。AI 回覆會自動朗讀，支援多重對話管理、角色設定，對話語言可選日本語／中文／English，介面文字亦提供三語切換。已內建 **Live2D 3D 演出**：開啟「啟用 3D 演出」後，AI 會在回覆時輸出 `[3d]` 指令，驅動另一視窗中的 3D 角色做表情、動作與口型同步。
 
 主程式使用 Python 標準庫，另使用 **deep-translator** 將非日文回覆翻成日文朗讀；相依套件列於 `requirements.txt`。
 
@@ -11,7 +11,7 @@
 - **介面與對話語言分離**：主畫面的語言下拉可切換介面文字；每個 chat 建立後即綁定自己的語言，切換介面不會改寫既有對話檔的 `lang`
   - 日本語：模型回覆、顯示與朗讀都使用同一份日文原文，不需翻譯
   - 中文／English：模型只回覆該語言；程式使用 `deep-translator` 翻譯成日文，日文譯文不會送回模型、不佔 LLM token
-- **雙來源 LLM**：一鍵切換本機 Ollama 或 OpenRouter（顯示全部模型，模型 Combobox 可編輯即時篩選關鍵字）
+- **三來源 LLM**：一鍵切換本機 Ollama、OpenRouter 或 NVIDIA API（顯示全部模型，模型 Combobox 可編輯即時篩選關鍵字）
 - **多重對話管理**：每個對話存成獨立 JSON，可開新對話、載入、改名、刪除；記錄當下使用的聲音／服務／模型／語言，載入時自動還原
 - **自動命名**：新對話先以時間戳命名，第一則回覆後由 AI 自動取標題（標題語言跟隨對話語言），之後可手動改名；允許多個對話同名（清單自動加編號區分）
 - **角色設定**：自訂 AI 人設（例如「傲嬌的妹妹」），可透過「編輯」按鈕開啟多行對話框輸入完整角色描述（含範本載入），跟著對話一起存在 chats/*.json，載入對話即還原人設
@@ -54,7 +54,7 @@
 | 作業系統 | Windows 10 以上（使用 winsound 播放音訊） |
 | Python | 3.9 以上（開發環境為 Anaconda Python 3.13.9；`chromadb` 需要較新版本） |
 | VOICEVOX | [產品版 0.25.2](https://voicevox.hiroshiba.jp/)（`voicevox-windows-directml-0.25.2.zip`），啟動後引擎自動監聽 `127.0.0.1:50021` |
-| 對話來源 | Ollama（本機）或 OpenRouter API 金鑰（擇一即可） |
+| 對話來源 | Ollama（本機）、OpenRouter API 金鑰 或 NVIDIA API 金鑰（擇一即可） |
 | 3D 演出（選用） | Live2D 模型放 `3D/`（資料夾未入版控）；建置前端需 Node.js；通常使用 Chrome／Edge／Firefox 開啟檢視器 |
 
 ## 安裝
@@ -98,6 +98,19 @@ ollama pull dolphin-llama3   # 使用「用 Dolphin」分流時需要（渲染�
 
 3. 重新啟動程式
 
+### 2C. 使用 NVIDIA API（線上）
+
+1. 到 https://build.nvidia.com/explore/model 建立 NVIDIA API 金鑰（或在 NVIDIA Build / NVIDIA NIM 相關頁面申請）
+2. 編輯 `.env`：
+
+   ```ini
+   NVIDIA_API_KEY=nvapi-xxxxxxxxxxxxxx
+   ```
+
+   語言不存放於 `.env`：每次啟動時在語言選擇視窗選擇（預設帶入最新聊天紀錄的語言）。
+
+3. 重新啟動程式
+
 ## 使用方法
 
 ```powershell
@@ -110,7 +123,7 @@ C:\ProgramData\Anaconda3\python.exe AI_voice_chat_ui.py
 
 | 區塊 | 說明 |
 |------|------|
-| 狀態列 | 即時顯示引擎／Ollama／OpenRouter 連線狀態（綠＝正常、紅＝未連線） |
+| 狀態列 | 即時顯示引擎／Ollama／OpenRouter／NVIDIA 連線狀態（綠＝正常、紅＝未連線） |
 | 聲音列 | Provider 切換 → 角色 Combobox（偏好 3 個角色優先顯示，取消勾選「偏好」展開全部）→ 風格 Combobox（對應角色的朗讀風格）→ 偏好篩選 checkbox |
 | 模型列 | 模型 Combobox（可編輯+即時篩選，右側有文字輸入框可過濾關鍵字）→ 介面語言切換（保留目前 chat 的語言） |
 | 翻譯列 | 翻譯引擎切換（Google／Ollama，選 Ollama 時可自選本機翻譯模型，影響非日語回覆的日文朗讀稿）→ Dolphin 後製開關＋模型輸入（勾選後強模型先生成回覆，再由 Dolphin 依後製提示詞潤飾）→ 停止朗讀 |
@@ -251,7 +264,7 @@ AI_voice_chat_ui.py
 | `text` | `(文字, tag)` 附加到對話區 |
 | `ai_msg` | `(conv, voice)` 顯示一則 AI 回覆（含朗讀） |
 | `busy` | `(bool)` 切換忙碌鎖與按鈕可用狀態 |
-| `engine_ok/ng`、`ollama_ok/ng`、`or_ok/ng` | 狀態列紅綠燈 |
+| `engine_ok/ng`、`ollama_ok/ng`、`or_ok/ng`、`nvidia_ok/ng` | 狀態列紅綠燈 |
 | `voices`、`ollama_models`、`or_models` | 載入聲音／模型清單 |
 | `sessions` | 更新對話清單下拉 |
 | `restore` | 還原一個對話工作階段 |
