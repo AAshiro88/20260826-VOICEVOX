@@ -2864,6 +2864,7 @@ class VoiceChatApp:
         # 強模型產生的 [3d] 指令（強模型為唯一來源，Dolphin 後製時不得增刪）
         pre_3d_commands = []
         try:
+            # --- Dolphin 後製（僅當使用者勾選並指定模型時才執行）---
             if self.dolphin_use_var.get() and self.dolphin_model.strip():
                 post_hint = DOLPHIN_POSTPROCESS_PROMPT.get(
                     self.convo_lang, DOLPHIN_POSTPROCESS_PROMPT["zh"]
@@ -2878,15 +2879,20 @@ class VoiceChatApp:
                     else:
                         _, base_clean = split_3d(base_reply)
                     # 階段2：Dolphin 後製潤飾（不讀歷史，只讀原文）
-                    reply = self.call_llm(
-                        [
-                            {"role": "system", "content": post_hint},
-                            {"role": "user", "content": base_clean},
-                        ],
-                        provider="ollama",
-                        model=self.dolphin_model.strip(),
-                        timeout=300,
-                    )
+                    try:
+                        reply = self.call_llm(
+                            [
+                                {"role": "system", "content": post_hint},
+                                {"role": "user", "content": base_clean},
+                            ],
+                            provider="ollama",
+                            model=self.dolphin_model.strip(),
+                            timeout=300,
+                        )
+                    except Exception as de:
+                        # Dolphin 後製失敗：回退使用強模型原始回覆
+                        self._emit("text", tr("msg_dolphin_fallback").format(de), "sys")
+                        reply = base_clean
                 else:
                     # 後製提示詞為空 → 跳過 Dolphin，直接用一般模型
                     self._emit("text", tr("msg_dolphin_skip"), "sys")
@@ -2894,17 +2900,8 @@ class VoiceChatApp:
             else:
                 reply = self.call_llm(messages)
         except Exception as e:
-            # Dolphin 不可用（未下載模型、引擎未啟動等）時回退一般模型
-            self._emit("text", tr("msg_dolphin_fallback").format(e), "sys")
-            try:
-                reply = self.call_llm(messages)
-            except Exception as e2:
-                self._emit("text", tr("msg_llm_failed").format(e2), "sys")
-                self._emit("busy", False)
-                return
-        except Exception as e:
-            # 呼叫失敗時保留使用者訊息，不從歷史移除，
-            # 讓「重新生成」可以直接重試該則訊息，而不會誤刪前一則已成功的回覆
+            # 主模型呼叫失敗：保留使用者訊息，不從歷史移除，
+            # 讓「重新生成」可以直接重試該則訊息
             self._emit("text", tr("msg_llm_failed").format(e), "sys")
             self._emit("busy", False)
             return
