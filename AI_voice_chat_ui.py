@@ -517,8 +517,18 @@ MEMORY_HEADERS = {
 # 模型輸出中代表「沒有可記憶內容」的關鍵字（依語言），出現即視為空結果
 MEMORY_NONE_TOKENS = ("無", "なし", "none")
 
-# 翻譯引擎預設值："google"（deep-translator）或 "ollama"（本機 Ollama 模型）
+# 翻譯引擎預設值："google"（deep-translator）、"ollama"（本機 Ollama 模型）
+# 或 "nvidia"（NVIDIA API）
 DEFAULT_TRANSLATION_PROVIDER = "google"
+
+# NVIDIA 翻譯預設模型（空字串表示讓 NVIDIA API 自行選擇預設模型；
+# 使用者也可自行填入，例如 "nvidia/nemotron-4" 等）
+DEFAULT_NVIDIA_TRANSLATION_MODEL = ""
+_NVIDIA_TRANSLATE_SYSTEM_PROMPT = {
+    "ja": "あなたは翻訳者です。以下のテキストを自然な日本語に翻訳してください。翻訳結果のみを出力し、説明や注釈は付けないでください。",
+    "zh": "你是翻譯員。請將以下文字翻成自然的日文，只輸出翻譯結果，不加任何說明。",
+    "en": "You are a translator. Translate the following text into natural Japanese. Output only the translation, no explanations.",
+}
 
 # Dolphin 後製潤飾：強模型正常生成回覆後，由本機 Dolphin 依後製指示做詞彙／語氣潤飾。
 # 使用者請自行編輯下列常數填入後製指示（三語各一，不能全為空）；
@@ -649,19 +659,22 @@ def assistant_conv_text(content, lang):
 
 
 def translate_to_japanese(
-    text, lang, retries=3, provider="google", ollama_model=None
+    text, lang, retries=3, provider="google", ollama_model=None, nvidia_model=None
 ):
     """將中文或英文回覆轉成供 VOICEVOX 朗讀的日文。
 
     provider="google"：使用 deep-translator GoogleTranslator；"ollama"：使用
-    本機 Ollama 模型（ollama_model 指定實際模型，None 時用預設）。不做跨引擎
-    降級，選哪個就走哪個。
+    本機 Ollama 模型（ollama_model 指定實際模型，None 時用預設）；
+    "nvidia"：使用 NVIDIA API（nvidia_model 指定模型，None 或空字串時用 API 預設）。
+    不做跨引擎降級，選哪個就走哪個。
     """
     text = (text or "").strip()
     if not text or lang == "ja":
         return text
     if provider == "ollama":
         return _translate_with_ollama(text, lang, model=ollama_model)
+    if provider == "nvidia":
+        return _translate_with_nvidia(text, lang, model=nvidia_model)
     # Google 翻譯（rate limit 保護：指數退避重試）
     if GoogleTranslator is None:
         raise RuntimeError("找不到 deep-translator；請執行 pip install -r requirements.txt")
@@ -715,6 +728,40 @@ def _translate_with_ollama(text, lang, model=None):
     result = json.loads(resp.decode("utf-8"))["message"]["content"].strip()
     if not result:
         raise RuntimeError("Ollama 翻譯未傳回結果")
+    return result
+
+
+def _translate_with_nvidia(text, lang, model=None):
+    """以 NVIDIA API 將中文或英文翻譯成日文。
+
+    model 為 None 或空字串時，使用 NVIDIA API 的預設模型；否則使用
+    使用者指定的模型名稱（例如 "nvidia/nemotron-4"）。NVIDIA API
+    採 OpenAI 相容的 /chat/completions 端點。
+    """
+    if not NVIDIA_API_KEY:
+        raise RuntimeError("未設定 NVIDIA_API_KEY（.env）")
+    prompt = _NVIDIA_TRANSLATE_SYSTEM_PROMPT.get(lang, _NVIDIA_TRANSLATE_SYSTEM_PROMPT["zh"])
+    payload = {
+        "model": model or DEFAULT_NVIDIA_TRANSLATION_MODEL,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 400,
+    }
+    resp = post_json(
+        "/chat/completions",
+        NVIDIA_URL,
+        payload=payload,
+        headers={
+            "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        },
+        timeout=120,
+    )
+    result = json.loads(resp.decode("utf-8"))["choices"][0]["message"]["content"].strip()
+    if not result:
+        raise RuntimeError("NVIDIA 翻譯未傳回結果")
     return result
 
 
@@ -1069,7 +1116,7 @@ class VoiceChatApp:
         self.translate_engine_var = tk.StringVar(value=DEFAULT_TRANSLATION_PROVIDER)
         self.translate_engine_box = ttk.Combobox(
             mid3, state="readonly", width=10,
-            values=["google", "ollama"],
+            values=["google", "ollama", "nvidia"],
             textvariable=self.translate_engine_var,
         )
         self.translate_engine_box.pack(side="left", padx=(4, 0))
@@ -1754,12 +1801,19 @@ class VoiceChatApp:
     # ---------- 翻譯引擎設定（Google / Ollama，Ollama 可自選模型） ----------
 
     def _on_translate_provider_changed(self, event=None):
-        """翻譯引擎切換：選 ollama 時啟用模型下拉並載入清單。"""
+        """翻譯引擎切換：選 ollama 時載入本地模型清單；選 nvidia 時啟用
+        手動輸入 NVIDIA 模型名稱；否則停用模型下拉。"""
         if self.translate_model_box is None:
             return
-        if self.translate_engine_var.get() == "ollama":
+        provider = self.translate_engine_var.get()
+        if provider == "ollama":
             self.translate_model_box.configure(state="normal")
             self._refresh_translate_models()
+        elif provider == "nvidia":
+            self.translate_model_box.configure(state="normal")
+            # NVIDIA 使用手動輸入模型名稱，不綁 Ollama 清單
+            if not self.translate_model_box.get():
+                self.translate_model_box.set(DEFAULT_NVIDIA_TRANSLATION_MODEL)
         else:
             self.translate_model_box.configure(state="disabled")
 
@@ -2397,6 +2451,7 @@ class VoiceChatApp:
                     conv, self.convo_lang,
                     provider=self.translate_engine_var.get(),
                     ollama_model=self.translate_model,
+                    nvidia_model=self.translate_model,
                 )
                 self.history[target_idx]["voice"] = voice
                 self.write_session_file()
@@ -2836,6 +2891,7 @@ class VoiceChatApp:
             voice = legacy_voice or translate_to_japanese(
                 conv, self.convo_lang, provider=self.translate_engine_var.get(),
                 ollama_model=self.translate_model,
+                nvidia_model=self.translate_model,
             )
         except Exception as e:
             # 翻譯服務失敗不能讓整個對話消失；保留文字回覆並略過朗讀。
