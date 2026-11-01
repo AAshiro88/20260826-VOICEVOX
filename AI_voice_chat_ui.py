@@ -734,15 +734,19 @@ def _translate_with_ollama(text, lang, model=None):
 def _translate_with_nvidia(text, lang, model=None):
     """以 NVIDIA API 將中文或英文翻譯成日文。
 
-    model 為 None 或空字串時，使用 NVIDIA API 的預設模型；否則使用
-    使用者指定的模型名稱（例如 "nvidia/nemotron-4"）。NVIDIA API
-    採 OpenAI 相容的 /chat/completions 端點。
+    model 為 None 或空字串時，要求使用者在翻譯模型輸入框填入
+    NVIDIA 模型名稱（例如 "nvidia/nemotron-4"），不得送空字串給 API。
+    NVIDIA API 採 OpenAI 相容的 /chat/completions 端點。
     """
     if not NVIDIA_API_KEY:
         raise RuntimeError("未設定 NVIDIA_API_KEY（.env）")
+    if not model or not model.strip():
+        raise RuntimeError(
+            "請在「翻譯模型」輸入框填入 NVIDIA 模型名稱（例如 nvidia/nemotron-4）"
+        )
     prompt = _NVIDIA_TRANSLATE_SYSTEM_PROMPT.get(lang, _NVIDIA_TRANSLATE_SYSTEM_PROMPT["zh"])
     payload = {
-        "model": model or DEFAULT_NVIDIA_TRANSLATION_MODEL,
+        "model": model.strip(),
         "messages": [
             {"role": "system", "content": prompt},
             {"role": "user", "content": text},
@@ -1344,6 +1348,8 @@ class VoiceChatApp:
                     self.nvidia_models = msg[1]
                     if self.provider == "nvidia":
                         self._apply_models()
+                    if self.translate_engine_var.get() == "nvidia":
+                        self._refresh_translate_models(provider="nvidia")
                 elif kind == "sessions":
                     # msg：names, paths(dict name->str), select_name
                     self.session_paths = {n: Path(p) for n, p in msg[2].items()}
@@ -1801,8 +1807,8 @@ class VoiceChatApp:
     # ---------- 翻譯引擎設定（Google / Ollama，Ollama 可自選模型） ----------
 
     def _on_translate_provider_changed(self, event=None):
-        """翻譯引擎切換：選 ollama 時載入本地模型清單；選 nvidia 時啟用
-        手動輸入 NVIDIA 模型名稱；否則停用模型下拉。"""
+        """翻譯引擎切換：選 ollama 時載入本地模型清單；選 nvidia 時載入
+        NVIDIA API 模型清單；否則停用模型下拉。"""
         if self.translate_model_box is None:
             return
         provider = self.translate_engine_var.get()
@@ -1811,9 +1817,7 @@ class VoiceChatApp:
             self._refresh_translate_models()
         elif provider == "nvidia":
             self.translate_model_box.configure(state="normal")
-            # NVIDIA 使用手動輸入模型名稱，不綁 Ollama 清單
-            if not self.translate_model_box.get():
-                self.translate_model_box.set(DEFAULT_NVIDIA_TRANSLATION_MODEL)
+            self._refresh_translate_models(provider="nvidia")
         else:
             self.translate_model_box.configure(state="disabled")
 
@@ -1823,21 +1827,36 @@ class VoiceChatApp:
             self.translate_model_box.get().strip() if self.translate_model_box else ""
         )
 
-    def _refresh_translate_models(self):
-        """把目前 Ollama 模型清單放入翻譯模型下拉；保留手動輸入並預設 qwen2.5:7b。"""
+    def _refresh_translate_models(self, provider=None):
+        """把目前翻譯模型清單放入翻譯模型下拉。
+
+        provider="ollama"：顯示 Ollama 模型清單；
+        provider="nvidia"：顯示 NVIDIA API 模型清單（self.nvidia_models）；
+        其他或 None：維持目前行為（預設 Ollama）。
+        保留手動輸入並套用預設值。
+        """
         if self.translate_model_box is None:
             return
-        models = list(self.ollama_models)
-        current = self.translate_model_box.get().strip()
-        if current and current not in models:
-            models.append(current)
-        self.translate_model_box.configure(values=models)
-        if not self.translate_model_box.get():
+        use_provider = provider or self.translate_engine_var.get()
+        if use_provider == "nvidia":
+            models = list(getattr(self, "nvidia_models", []))
+            default = (
+                DEFAULT_NVIDIA_TRANSLATION_MODEL
+                if DEFAULT_NVIDIA_TRANSLATION_MODEL in models
+                else (models[0] if models else "")
+            )
+        else:
+            models = list(self.ollama_models)
             default = (
                 DEFAULT_TRANSLATION_MODEL
                 if DEFAULT_TRANSLATION_MODEL in models
                 else (models[0] if models else "")
             )
+        current = self.translate_model_box.get().strip()
+        if current and current not in models:
+            models.append(current)
+        self.translate_model_box.configure(values=models)
+        if not self.translate_model_box.get():
             self.translate_model_box.set(default)
         self.translate_model = self.translate_model_box.get().strip()
 
