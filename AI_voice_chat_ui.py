@@ -1978,11 +1978,18 @@ class VoiceChatApp:
 
         # 還原服務與模型
         self.provider = provider
-        self.provider_box.current(1 if provider == "openrouter" else 0)
+        provider_index = (
+            1 if provider == "openrouter"
+            else 2 if provider == "nvidia"
+            else 0
+        )
+        self.provider_box.current(provider_index)
         self._apply_models()
         saved_model = session["model"]
         if saved_model:
             if provider == "openrouter":
+                self.model_box.set(saved_model)
+            elif provider == "nvidia":
                 self.model_box.set(saved_model)
             elif saved_model in (self.ollama_models or []):
                 self.model_box.set(saved_model)
