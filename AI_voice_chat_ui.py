@@ -567,7 +567,11 @@ def http_json(path, base_url, params=None, timeout=15):
 
 
 def post_json(path, base_url, params=None, payload=None, timeout=60, headers=None):
-    """發送 POST（JSON 內容，payload 為 None 時送空內容）並回傳原始回應。"""
+    """發送 POST（JSON 內容，payload 為 None 時送空內容）並回傳原始回應。
+
+    HTTP 錯誤時會讀取 response body 並附在例外訊息中，方便除錯。
+    """
+    import urllib.error
     url = base_url + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -581,8 +585,16 @@ def post_json(path, base_url, params=None, payload=None, timeout=60, headers=Non
         headers=all_headers,
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as res:
-        return res.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            return res.read()
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP Error {e.code}: {e.reason}\nResponse: {body}")
 
 
 def detect_lang(text):
@@ -1918,6 +1930,8 @@ class VoiceChatApp:
             "lang": data.get("lang") if data.get("lang") in CONVO_LANG_NAMES else DEFAULT_CONVO_LANG,
             "persona": data.get("persona", "") if isinstance(data.get("persona"), str) else "",
             "enable_3d": bool(data.get("enable_3d")),
+            "translation_provider": data.get("translation_provider", DEFAULT_TRANSLATION_PROVIDER),
+            "translation_model": data.get("translation_model", ""),
             "history": history,
         }
         self.current_session = session
@@ -1956,8 +1970,7 @@ class VoiceChatApp:
         self._on_translate_provider_changed()
         saved_tmodel = session.get("translation_model", "")
         if (
-            self.translate_engine_var.get() == "ollama"
-            and saved_tmodel
+            saved_tmodel
             and self.translate_model_box is not None
         ):
             self.translate_model_box.set(saved_tmodel)
