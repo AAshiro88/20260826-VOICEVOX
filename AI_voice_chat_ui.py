@@ -737,6 +737,8 @@ def _translate_with_nvidia(text, lang, model=None):
     model 為 None 或空字串時，要求使用者在翻譯模型輸入框填入
     NVIDIA 模型名稱（例如 "nvidia/nemotron-4"），不得送空字串給 API。
     NVIDIA API 採 OpenAI 相容的 /chat/completions 端點。
+    請求參數僅保留 model 與 messages，避免部分模型不接受
+    temperature / max_tokens 導致 HTTP 404。
     """
     if not NVIDIA_API_KEY:
         raise RuntimeError("未設定 NVIDIA_API_KEY（.env）")
@@ -751,8 +753,6 @@ def _translate_with_nvidia(text, lang, model=None):
             {"role": "system", "content": prompt},
             {"role": "user", "content": text},
         ],
-        "temperature": 0.3,
-        "max_tokens": 400,
     }
     resp = post_json(
         "/chat/completions",
@@ -1090,7 +1090,7 @@ class VoiceChatApp:
         mid2 = ttk.Frame(self.root, padding=(6, 2))
         mid2.pack(fill="x")
         ttk.Label(mid2, text=tr("lbl_model")).pack(side="left")
-        self.model_box = ttk.Combobox(mid2, width=30)
+        self.model_box = ttk.Combobox(mid2, width=40)
         self.model_box.pack(side="left", padx=(4, 4))
         self.model_box.bind("<<ComboboxSelected>>", self.on_model_selected)
         self.model_box.bind("<KeyRelease>", self._on_model_filter)
@@ -1128,7 +1128,7 @@ class VoiceChatApp:
             "<<ComboboxSelected>>", self._on_translate_provider_changed
         )
         # 翻譯模型下拉（選 ollama 時才可編輯，可手動輸入自訂 tag）
-        self.translate_model_box = ttk.Combobox(mid3, width=20, state="disabled")
+        self.translate_model_box = ttk.Combobox(mid3, width=40, state="disabled")
         self.translate_model_box.pack(side="left", padx=(8, 0))
         self.translate_model_box.bind(
             "<<ComboboxSelected>>", self.on_translate_model_selected
@@ -1139,7 +1139,7 @@ class VoiceChatApp:
             mid3, text=tr("btn_dolphin"), variable=self.dolphin_use_var,
             command=self._on_dolphin_toggle,
         ).pack(side="left", padx=(16, 2))
-        self.dolphin_model_box = ttk.Combobox(mid3, width=22, state="disabled")
+        self.dolphin_model_box = ttk.Combobox(mid3, width=40, state="disabled")
         self.dolphin_model_box.pack(side="left", padx=(0, 8))
         self.dolphin_model_box.bind(
             "<<ComboboxSelected>>", self.on_dolphin_model_selected
